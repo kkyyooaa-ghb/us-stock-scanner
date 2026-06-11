@@ -25,18 +25,20 @@
 
 不需要:`FINMIND_TOKEN`、`TWELVEDATA_TOKEN`(US 版已移除)。
 
-## 3. cron-job.org(主掃描觸發)
+## 3. 排程(V1.0.1 起:GitHub 雙 cron,免設定)
 
-建一個 job:
-- **URL**:`https://api.github.com/repos/<OWNER>/<REPO>/actions/workflows/scan.yml/dispatches`
-- **Method**:POST
-- **Headers**:`Authorization: Bearer <GITHUB_PAT>`、`Accept: application/vnd.github+json`
-  (PAT:fine-grained 給該 repo `Actions: Read and write`;classic 給 `repo`+`workflow`)
-- **Body**:`{"ref":"main"}`
-- **時區**:`America/New_York` ← **關鍵,DST 自動處理**(台北 21:00 夏令 / 22:00 冬令)
-- **排程**:週一~週五 09:00
+**主方案(已內建於 scan.yml,推上去即生效,零額外設定)**:
+- 雙 cron `13:07 / 14:07 UTC` + gate job 只放行「09:xx ET」那一發
+- DST 換季全自動;另一發 3 秒內跳過(Actions 列表看到 gate-skipped 是正常的)
+- 取 :07 錯峰,降低 GitHub 整點壅塞的延遲/漏跑率
 
-季營收 seed 走 GitHub schedule(週六,週頻不受 DST 影響),不用另建 cron job。
+**備援方案(若觀察期內 GitHub schedule 漏跑再啟用)**:cron-job.org
+- URL `https://api.github.com/repos/<OWNER>/<REPO>/actions/workflows/scan.yml/dispatches`
+- POST、Headers `Authorization: Bearer <PAT(Actions: R/W)>`、`Accept: application/vnd.github+json`
+- Body `{"ref":"main"}`、時區 `America/New_York`、平日 09:00
+- 啟用後可把 scan.yml 的 schedule 區塊註解掉避免重複觸發
+
+季營收 seed 維持 GitHub schedule(週六,週頻不受 DST 影響)。
 
 ## 4. 美股休市日(2026 下半年,cron-job.org 手動停一次或忽略該日訊息)
 
@@ -48,7 +50,7 @@
 1. repo 建好、secrets 設好、`data/quarter_revenue_cache.json` commit 進去
 2. GitHub UI 手動跑一次 `scan.yml`(非排程時段:**不勾** force → 驗 TG 推播;確認後可勾 force 補寫一筆 Notion 驗 DB)
 3. 確認 Notion「美股掃描」出現 `YYYY-MM-DD_<Ticker>` 紀錄、欄位齊全
-4. cron-job.org job 啟用 → 隔天美東 09:00 看自動推播
+4. 推上 V1.0.1 scan.yml 後排程即自動生效 → 隔個交易日美東 09:07 看自動推播
 5. 之後進入觀察期:**只收集、不調參**(D8:任何權重調整等 n≥15)
 
 ## 6. 已知待辦(依優先序)

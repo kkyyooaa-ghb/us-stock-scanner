@@ -1,0 +1,102 @@
+name: 美股盤前掃描排程
+
+# V1.0.1-US(2026-06-11):排程改 GitHub 雙 cron + ET 護欄(取代 cron-job.org)
+# ═══════════════════════════════════════════════════════════════
+# 設計:GitHub cron 走 UTC 不跟 DST → 排兩發,讓 gate job 只放行
+#       「美東 09 點檔」那一發,另一發 3 秒內自動跳過:
+#   夏令(EDT,UTC-4):13:07 UTC = 09:07 ET ✓ 放行 | 14:07 UTC = 10:07 ET ✗ 跳過
+#   冬令(EST,UTC-5):13:07 UTC = 08:07 ET ✗ 跳過 | 14:07 UTC = 09:07 ET ✓ 放行
+#   → DST 切換全自動,一年兩次換季零維護
+# 取 :07 不取 :00:GitHub 整點 cron 壅塞,延遲/漏跑率較高(官方建議錯峰)
+# 已知殘餘風險:GitHub schedule 偶發延遲或漏跑(台股 V13.9.3 棄用原因)。
+#   處置:觀察期內若發生漏跑,改用備援方案 cron-job.org(見 SETUP.md §3,
+#   workflow_dispatch 觸發口保留,隨時可切)。
+# 美股休市日仍會觸發(待辦 P2:exchange-calendars 護欄)。
+# ═══════════════════════════════════════════════════════════════
+
+on:
+  schedule:
+    - cron: '7 13 * * 1-5'   # 夏令 EDT → 09:07 ET(冬令時 =08:07,被 gate 跳過)
+    - cron: '7 14 * * 1-5'   # 冬令 EST → 09:07 ET(夏令時 =10:07,被 gate 跳過)
+  workflow_dispatch:
+    inputs:
+      force_notion_sync:
+        description: '非排程時段強制寫入 Notion(補跑用,平常勿勾)'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      go: ${{ steps.check.outputs.go }}
+    steps:
+      - name: ET 時區護欄(雙 cron 去重)
+        id: check
+        run: |
+          ET_NOW=$(TZ=America/New_York date '+%Y-%m-%d %H:%M %Z')
+          echo "美東現在:${ET_NOW} | 觸發來源:${{ github.event_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "手動觸發 → 直接放行(窗外寫入仍由程式內 08:30-09:30 護欄把關)"
+            echo "go=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ET_HOUR=$(TZ=America/New_York date '+%H')
+          if [ "$ET_HOUR" = "09" ]; then
+            echo "09:xx ET → 放行本季正確那一發"
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "非 09:xx ET → 此發屬於錯季 cron,跳過(正常行為,非錯誤)"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  scan:
+    needs: gate
+    if: needs.gate.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20            # 含 P7.5 LLM enrichment buffer(沿用台股 V13.11.0)
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@v5
+
+      - name: 設定 Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安裝相依套件
+        run: pip install -r requirements.txt
+
+      - name: 執行掃描
+        env:
+          NOTION_TOKEN:      ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID:      ${{ secrets.NOTION_DB_ID }}        # 美股掃描 DB:37c323c3fc0180d3a84acdea1a5ca2af
+          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          # P7.5 LLM 精選報告 enrichment(沿用台股模組)
+          GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
+          TAVILY_API_KEY:    ${{ secrets.TAVILY_API_KEY }}
+          # 補跑護欄開關(workflow_dispatch 輸入)
+          FORCE_NOTION_SYNC: ${{ github.event.inputs.force_notion_sync }}
+        run: python main.py
+
+      - name: 確保結果檔存在
+        if: always()
+        run: |
+          if [ ! -f scan_result.csv ]; then
+            echo "Ticker,Price,MA20,MA60,VolRatio,Support,Resistance,Position,Status,Priority,Score,ConsecDays,DistMA60Pct,DistTag,EntryLow,EntryHigh,StopLoss,ATR,ATR_Pct,DistDirection,DistATRMult,YoY,PreGapPct" > scan_result.csv
+          fi
+
+      - name: 上傳掃描結果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-result-${{ github.run_id }}
+          path: scan_result.csv
+          retention-days: 30
