@@ -1,0 +1,9 @@
+# us-stock-scanner V1.0.0-US
+# 與台股版相同(FinMind/TwelveData 走 requests,本就無專屬套件;US 版已移除該二源)
+# google-genai:P7.5 LLM enrichment(Gemini 2.5 Flash 新版統一 SDK)
+# Tavily 用 requests 直接打 REST API,不需另裝 tavily-python
+yfinance>=0.2.40
+pandas>=2.0.0
+numpy>=1.26.0
+requests>=2.31.0
+google-genai>=1.0.0

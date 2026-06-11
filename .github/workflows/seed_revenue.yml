@@ -1,0 +1,51 @@
+name: Seed Quarter Revenue Cache
+
+# V1.0.0-US(2026-06-11)
+# ═══════════════════════════════════════════════════════════════
+# 季營收 YoY cache 週更(原台股 seed_month_revenue 位,頻率日更 → 週更)
+#   - 來源:yfinance quarterly income statement(sources.py --seed-revenue)
+#   - 季頻資料 + cache stale 容忍 21 天 → 漏跑一週無感,低風險
+#   - 因此這支保留 GitHub schedule 當主觸發(週六 13:00 UTC ≈ 美東早上,
+#     避開工作日 runner 尖峰;"job not acquired" 偶發失敗可接受,
+#     若觀察到連續失敗再比照 scan.yml 改 cron-job.org)
+#   - 財報季(1月底/4月底/7月底/10月底)後可手動 workflow_dispatch 補一次,
+#     讓最新季 YoY 早一點進訊號
+# ═══════════════════════════════════════════════════════════════
+
+on:
+  schedule:
+    - cron: '0 13 * * 6'   # 每週六 13:00 UTC(週頻不受 DST 錯位影響)
+  workflow_dispatch:        # 財報季後手動補跑 / GitHub UI 手動觸發
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write   # 需要 commit cache 檔案
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install yfinance pandas requests
+
+      - name: Run quarter revenue cache seed
+        run: python sources.py --seed-revenue
+
+      - name: Commit & push cache
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/quarter_revenue_cache.json
+          if git diff --cached --quiet; then
+            echo "Cache 無變動,跳過 commit"
+          else
+            git commit -m "auto: update quarter revenue cache $(date +'%Y-%m-%d')"
+            git push
+          fi

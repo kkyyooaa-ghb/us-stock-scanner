@@ -1,0 +1,81 @@
+name: 美股盤前掃描排程
+
+# V1.0.0-US(2026-06-11)
+# ═══════════════════════════════════════════════════════════════
+# 觸發來源:cron-job.org(沿用台股 V13.9.3+ 決策,不用 GitHub schedule)
+#   - GitHub schedule 在 runner 短缺時頻繁失敗("job not acquired")
+#   - 更關鍵:GitHub cron 走 UTC、不跟美國日光節約,一年錯位兩次;
+#     cron-job.org 可把時區設 America/New_York,DST 自動處理
+#
+# cron-job.org 設定(建一個 job):
+#   URL    : https://api.github.com/repos/<OWNER>/<REPO>/actions/workflows/scan.yml/dispatches
+#   Method : POST
+#   Headers: Authorization: Bearer <GITHUB_PAT>     ← PAT 需 actions:write(fine-grained)或 repo+workflow(classic)
+#            Accept: application/vnd.github+json
+#   Body   : {"ref":"main"}
+#   時區   : America/New_York   ← 關鍵!DST 由 cron-job.org 處理
+#   排程   : 週一~週五 09:00(美東) = 台北 21:00(夏令)/22:00(冬令)
+#
+# 程式內護欄:main.py 只在 08:30–09:30 ET 窗內寫 Notion(is_in_scan_window),
+#   窗外手動補跑須在下方 workflow_dispatch 勾 force_notion_sync。
+#   美股休市日:窗內無盤前報價 → SPY 區塊降級、燈號保守,Notion 仍可能寫入;
+#   建議 cron-job.org 上半年休市日(元旦/MLK/總統日/耶穌受難日/陣亡將士/六月節/
+#   國慶/勞動/感恩/聖誕)手動停一次,或之後加 exchange-calendars 護欄(待辦)。
+# ═══════════════════════════════════════════════════════════════
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_notion_sync:
+        description: '非排程時段強制寫入 Notion(補跑用,平常勿勾)'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20            # 含 P7.5 LLM enrichment buffer(沿用台股 V13.11.0)
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@v5
+
+      - name: 設定 Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安裝相依套件
+        run: pip install -r requirements.txt
+
+      - name: 執行掃描
+        env:
+          NOTION_TOKEN:      ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID:      ${{ secrets.NOTION_DB_ID }}        # 美股掃描 DB:37c323c3fc0180d3a84acdea1a5ca2af
+          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          # P7.5 LLM 精選報告 enrichment(沿用台股模組)
+          GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
+          TAVILY_API_KEY:    ${{ secrets.TAVILY_API_KEY }}
+          # 補跑護欄開關(workflow_dispatch 輸入)
+          FORCE_NOTION_SYNC: ${{ github.event.inputs.force_notion_sync }}
+        run: python main.py
+
+      - name: 確保結果檔存在
+        if: always()
+        run: |
+          if [ ! -f scan_result.csv ]; then
+            echo "Ticker,Price,MA20,MA60,VolRatio,Support,Resistance,Position,Status,Priority,Score,ConsecDays,DistMA60Pct,DistTag,EntryLow,EntryHigh,StopLoss,ATR,ATR_Pct,DistDirection,DistATRMult,YoY,PreGapPct" > scan_result.csv
+          fi
+
+      - name: 上傳掃描結果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-result-${{ github.run_id }}
+          path: scan_result.csv
+          retention-days: 30
