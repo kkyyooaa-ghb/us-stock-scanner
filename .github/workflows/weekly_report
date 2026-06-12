@@ -1,0 +1,46 @@
+name: 美股掃描週報(觀察期)
+
+# V1.0.0(2026-06-11)
+# ═══════════════════════════════════════════════════════════════
+# 每週日 13:00 UTC = 台北 21:00(台北無 DST,此換算恆定,單 cron 即可)
+# 對齊台股「週日 21:00 校準提醒」節奏。
+# 資料源:本 repo 的 scan-result artifacts(內建 GITHUB_TOKEN,actions:read,
+#        不需任何新憑證)+ Notion 樣本計數(讀同一組 secrets,失敗優雅)
+# 觀察期版內容:分數分布 / Top5 / 6分常客 / Notion n/15 進度
+# 升級路線:P1(track_performance 回填)上線後 → 加 R 期望值/勝率成完整校準報告
+# ═══════════════════════════════════════════════════════════════
+
+on:
+  schedule:
+    - cron: '0 13 * * 0'   # 週日 13:00 UTC = 台北 21:00(恆定)
+  workflow_dispatch:        # 手動測試用
+
+permissions:
+  contents: read
+  actions: read             # 讀取 artifacts 所需
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 取出程式碼
+        uses: actions/checkout@v5
+
+      - name: 設定 Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安裝相依套件
+        run: pip install pandas requests
+
+      - name: 產出並推播週報
+        env:
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}   # 內建,免設定
+          NOTION_TOKEN:     ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID:     ${{ secrets.NOTION_DB_ID }}
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python weekly_report.py
