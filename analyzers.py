@@ -566,6 +566,70 @@ def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series,
     return atr if atr > 0 else 0.0
 
 
+def calculate_rsi(close: pd.Series, period: int = 14) -> float:
+    """
+    Wilder RSI(觀察期診斷用,為第二階段「超賣反彈」計分腿鋪路)。
+    回傳最新一根的 RSI(0–100);資料不足回 -1(哨兵,代表無效)。
+    """
+    if close is None or len(close) < period + 1:
+        return -1.0
+    delta = close.diff().dropna()
+    if len(delta) < period:
+        return -1.0
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    # Wilder smoothing
+    avg_gain = gain.iloc[:period].mean()
+    avg_loss = loss.iloc[:period].mean()
+    for g, l in zip(gain.iloc[period:], loss.iloc[period:]):
+        avg_gain = (avg_gain * (period - 1) + g) / period
+        avg_loss = (avg_loss * (period - 1) + l) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - 100 / (1 + rs), 1)
+
+
+def diagnose_dip_setup(close: pd.Series, vol: pd.Series,
+                       price: float, ma20: float, ma60: float,
+                       rsi: float, rsi_prev: float,
+                       vol_ratio: float, dist_tag: str) -> dict:
+    """
+    觀察期診斷(第一步):為「②超賣反彈 + ③盤整突破前低接」蒐集分布證據。
+    ⚠️ 純診斷/打標,不影響評分(D8:數據先、規則後);第二階段才據此寫計分腿。
+
+    回傳布林旗標 + 一個彙總用的 setup_type 字串:
+      vol_dry     量縮(vol_ratio < 0.7,台股值,待美股分布校準)
+      near_ma60   貼近 MA60(|dist| ≤ 8%,= 盤整低接候選位置)
+      oversold    RSI < 30
+      rsi_turn_up 超賣回升(rsi_prev < 30 且 rsi 較前一根上升)
+      hold_ma     回測不破(price ≥ MA60 或 ≥ MA20)
+      setup_type  none / oversold_bounce / consolidation_dip / both
+    """
+    flags = {
+        "rsi":         rsi,
+        "vol_dry":     bool(0 < vol_ratio < 0.7),
+        "near_ma60":   bool(ma60 > 0 and abs(price - ma60) / ma60 <= 0.08),
+        "oversold":    bool(0 <= rsi < 30),
+        "rsi_turn_up": bool(0 <= rsi_prev < 30 and rsi > rsi_prev),
+        "hold_ma":     bool((ma60 > 0 and price >= ma60) or (ma20 > 0 and price >= ma20)),
+    }
+
+    # 型態判定
+    is_oversold_bounce  = flags["rsi_turn_up"] and flags["vol_dry"]            # ②
+    is_consolidation    = flags["near_ma60"] and flags["vol_dry"] \
+                          and ("甜點價" in dist_tag)                            # ③
+    if is_oversold_bounce and is_consolidation:
+        flags["setup_type"] = "both"
+    elif is_oversold_bounce:
+        flags["setup_type"] = "oversold_bounce"
+    elif is_consolidation:
+        flags["setup_type"] = "consolidation_dip"
+    else:
+        flags["setup_type"] = "none"
+    return flags
+
+
 def get_effective_atr(atr: float, price: float) -> tuple[float, bool]:
     """V13.9.6: ATR% 死魚盤 floor 保護(原樣移植)
     ATR% < ATR_PCT_FLOOR 時以 price × ATR_PCT_FLOOR_REPLACE 取代,

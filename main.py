@@ -43,6 +43,7 @@ from analyzers import (
     classify_stock_position, determine_status,
     calculate_atr, calculate_entry_stop_levels,
     classify_dist_tag,
+    calculate_rsi, diagnose_dip_setup,              # 觀察期診斷(第一步)
     analyze_otc_index,                              # 小型股 ^RUT
 )
 from outputs import sync_notion, send_telegram
@@ -237,6 +238,15 @@ def run_scanner():
                 dist_tag=dist_tag, direction=dist_direction
             )
 
+            # ── 觀察期診斷(第一步,D8:純記錄不計分,為第二階段計分腿蒐證)──
+            rsi      = calculate_rsi(hist, period=14)
+            rsi_prev = calculate_rsi(hist.iloc[:-1], period=14) if len(hist) > 15 else -1.0
+            dip = diagnose_dip_setup(
+                close=hist, vol=vol, price=price, ma20=ma20, ma60=ma60,
+                rsi=rsi, rsi_prev=rsi_prev, vol_ratio=vol_ratio, dist_tag=dist_tag,
+            )
+            # ───────────────────────────────────────────────────────────
+
             results.append({
                 'Ticker':      ticker,
                 'Price':       price,
@@ -261,6 +271,14 @@ def run_scanner():
                 'DistATRMult':   round(dist_atr_mult, 2),
                 'YoY':           mr.get("yoy") if mr.get("ok") else None,
                 'PreGapPct':     None,   # D7:精選後才補抓(控 API 量)
+                # ── 觀察期診斷欄(第一步,純記錄)──
+                'RSI':           rsi,
+                'VolDry':        int(dip["vol_dry"]),
+                'NearMA60':      int(dip["near_ma60"]),
+                'Oversold':      int(dip["oversold"]),
+                'RsiTurnUp':     int(dip["rsi_turn_up"]),
+                'HoldMA':        int(dip["hold_ma"]),
+                'SetupType':     dip["setup_type"],
             })
 
             if idx % 20 == 0:
@@ -541,6 +559,8 @@ if __name__ == "__main__":
         with open("scan_result.csv", "w", encoding="utf-8-sig") as f:
             f.write("Ticker,Price,MA20,MA60,VolRatio,Support,Resistance,Position,Status,"
                     "Priority,Score,ConsecDays,DistMA60Pct,DistTag,EntryLow,EntryHigh,"
-                    "StopLoss,ATR,ATR_Pct,DistDirection,DistATRMult,YoY,PreGapPct\n")
-            f.write(f"ERROR,0,0,0,0,0,0,-,{type(e).__name__}: {e},-99,-99,0,0,-,0,0,0,0,0,,0,,\n")
+                    "StopLoss,ATR,ATR_Pct,DistDirection,DistATRMult,YoY,PreGapPct,"
+                    "RSI,VolDry,NearMA60,Oversold,RsiTurnUp,HoldMA,SetupType\n")
+            f.write(f"ERROR,0,0,0,0,0,0,-,{type(e).__name__}: {e},-99,-99,0,0,-,0,0,0,0,0,,0,,,"
+                    "-1,0,0,0,0,0,none\n")
         sys.exit(1)

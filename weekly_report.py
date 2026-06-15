@@ -152,12 +152,79 @@ def aggregate(days: list[tuple[str, "pd.DataFrame"]]) -> dict:
     warn_days = allw[allw["Priority"] < 0].groupby("Ticker")["date"].nunique()
     warn_regulars = warn_days[warn_days >= 2].sort_values(ascending=False)
 
+    # ── 逢低布局診斷彙總(第一步:為②超賣反彈/③盤整低接計分腿蒐證)──
+    dip = _aggregate_dip(days)
+
     return {
         "daily":         daily,
         "top5":          top5,
         "eq6_regulars":  list(eq6_regulars.items()),
         "warn_regulars": list(warn_regulars.items()),
         "total_ge7":     sum(d["ge7"] for d in daily),
+        "dip":           dip,
+    }
+
+
+def _aggregate_dip(days: list[tuple[str, "pd.DataFrame"]]) -> dict:
+    """逢低布局型態的週彙總(若 CSV 無診斷欄 → 回 available=False)"""
+    import pandas as pd
+
+    DIAG = {"RSI", "VolDry", "NearMA60", "Oversold", "RsiTurnUp", "HoldMA", "SetupType"}
+    frames = [df for _, df in days if DIAG.issubset(df.columns)]
+    if not frames:
+        return {"available": False}
+
+    tagged = []
+    for et_date, df in days:
+        if not DIAG.issubset(df.columns):
+            continue
+        sub = df.copy()
+        sub["date"] = et_date
+        tagged.append(sub)
+    allw = pd.concat(tagged, ignore_index=True)
+    for c in ("VolDry", "NearMA60", "Oversold", "RsiTurnUp", "HoldMA"):
+        allw[c] = pd.to_numeric(allw[c], errors="coerce").fillna(0).astype(int)
+    allw["RSI"] = pd.to_numeric(allw["RSI"], errors="coerce")
+    n_days = allw["date"].nunique()
+
+    def _avg_flag(col):
+        return allw.groupby("date")[col].sum().mean()
+
+    # 型態出現次數(跨日,以 ticker×日 計)
+    st = allw["SetupType"].value_counts().to_dict()
+
+    # ③ 盤整低接候選:出現 ≥2 日的常客(這就是你要的觀察名單雛形)
+    consol = allw[allw["SetupType"].isin(["consolidation_dip", "both"])]
+    consol_reg = consol.groupby("Ticker")["date"].nunique()
+    consol_reg = consol_reg[consol_reg >= 1].sort_values(ascending=False)
+
+    # ② 超賣反彈候選
+    ob = allw[allw["SetupType"].isin(["oversold_bounce", "both"])]
+    ob_reg = ob.groupby("Ticker")["date"].nunique()
+    ob_reg = ob_reg[ob_reg >= 1].sort_values(ascending=False)
+
+    # RSI 分布(只統計有效值 ≥0)
+    rsi_valid = allw[allw["RSI"] >= 0]["RSI"]
+    rsi_buckets = {
+        "lt30":   int((rsi_valid < 30).sum()),
+        "30_45":  int(((rsi_valid >= 30) & (rsi_valid < 45)).sum()),
+        "45_55":  int(((rsi_valid >= 45) & (rsi_valid < 55)).sum()),
+        "55_70":  int(((rsi_valid >= 55) & (rsi_valid < 70)).sum()),
+        "ge70":   int((rsi_valid >= 70).sum()),
+    }
+
+    return {
+        "available":     True,
+        "n_days":        n_days,
+        "avg_vol_dry":   round(_avg_flag("VolDry"), 1),
+        "avg_near_ma60": round(_avg_flag("NearMA60"), 1),
+        "avg_oversold":  round(_avg_flag("Oversold"), 1),
+        "avg_rsi_turn":  round(_avg_flag("RsiTurnUp"), 1),
+        "setup_counts":  st,
+        "consol_reg":    list(consol_reg.items())[:8],
+        "ob_reg":        list(ob_reg.items())[:8],
+        "rsi_buckets":   rsi_buckets,
+        "rsi_median":    round(float(rsi_valid.median()), 1) if len(rsi_valid) else None,
     }
 
 
@@ -251,6 +318,28 @@ def build_message(agg: dict, notion: dict,
     else:
         lines.append("<b>Notion 樣本</b>  讀取略過")
     lines.append("")
+
+    # ── 逢低布局診斷(第一步:②超賣反彈 + ③盤整低接 蒐證)──
+    dip = agg.get("dip", {})
+    if dip.get("available"):
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append("<b>🎯 逢低布局診斷</b>(設計新計分腿用,純記錄)")
+        lines.append(f"  日均:量縮 {dip['avg_vol_dry']} 檔 | 貼MA60 {dip['avg_near_ma60']} 檔 | "
+                     f"超賣 {dip['avg_oversold']} 檔 | 超賣回升 {dip['avg_rsi_turn']} 檔")
+        rb = dip["rsi_buckets"]
+        lines.append(f"  RSI 分布(中位 {dip.get('rsi_median','-')}):"
+                     f"&lt;30:{rb['lt30']} | 30-45:{rb['30_45']} | 45-55:{rb['45_55']} | "
+                     f"55-70:{rb['55_70']} | ≥70:{rb['ge70']}")
+        sc = dip["setup_counts"]
+        lines.append(f"  型態命中(檔×日):盤整低接 {sc.get('consolidation_dip',0)} | "
+                     f"超賣反彈 {sc.get('oversold_bounce',0)} | 雙重 {sc.get('both',0)}")
+        if dip["consol_reg"]:
+            names = "、".join(f"{t}({d}日)" for t, d in dip["consol_reg"][:6])
+            lines.append(f"  📐 <b>盤整低接候選</b>:{names}")
+        if dip["ob_reg"]:
+            names = "、".join(f"{t}({d}日)" for t, d in dip["ob_reg"][:6])
+            lines.append(f"  📉 <b>超賣反彈候選</b>:{names}")
+        lines.append("")
 
     # 觀察期判讀(規則式,不做主觀建議)
     if agg["total_ge7"] == 0:
