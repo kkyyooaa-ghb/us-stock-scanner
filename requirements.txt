@@ -7,3 +7,4 @@ pandas>=2.0.0
 numpy>=1.26.0
 requests>=2.31.0
 google-genai>=1.0.0
+exchange-calendars>=4.5    # V1.1.1:NYSE 交易日護欄(假日不掃描)

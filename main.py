@@ -34,6 +34,7 @@ from sources import (
     get_quarter_revenue_score,                      # 原月營收位(D3)
     get_premarket_quote,                            # D7 新訊號:個股盤前跳空
     is_in_scan_window,
+    is_trading_day,                                 # V1.1.1 交易日護欄(P2)
     ET_TZ,
 )
 from analyzers import (
@@ -74,6 +75,24 @@ def run_scanner():
     print(f"\n{'='*55}")
     print(f"🚀 美股盤前掃描 V1.0.0-US  {get_et_time()} ET / {get_tw_time()} 台北")
     print(f"{'='*55}\n")
+
+    # ========== 交易日護欄(V1.1.1,P2)— 根治假日仍寫 Notion ==========
+    # 放在最前面:休市日直接 return,不掃描、不發 TG、不寫 Notion、不耗 API。
+    # 用 NYSE 行事曆(確定性),自動處理國定假日/週末/半日市。
+    # 可用 FORCE_RUN=true 在休市日強制執行(測試用)。
+    td = is_trading_day()
+    force_run = os.environ.get('FORCE_RUN', 'false').lower() == 'true'
+    if td["ok"] and not td["is_session"]:
+        if force_run:
+            print(f"  ⚠️  今天美東休市({td['reason']}),但 FORCE_RUN=true → 強制執行")
+        else:
+            print(f"  🏖️  今天美東休市({td['date']}:{td['reason']})")
+            print(f"  → 跳過掃描(不發 TG、不寫 Notion、不耗 API)")
+            print(f"  → 若需強制執行,workflow_dispatch 設 FORCE_RUN=true")
+            return
+    elif td["ok"] and td["half_day"]:
+        # 半日市仍照常掃描(盤前邏輯不變),僅標記提醒
+        print(f"  ⏰ 今天為半日市({td['reason']}),盤前掃描照常執行")
 
     # ========== 第一件事:盤前宏觀(原匯率+期現貨位) ==========
     macro = analyze_macro()

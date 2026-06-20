@@ -87,6 +87,69 @@ def is_in_scan_window() -> bool:
     return start <= now <= end
 
 
+# 行事曆物件快取(避免每次呼叫重建)
+_NYSE_CAL = None
+
+
+def is_trading_day(date_et: str = None) -> dict:
+    """
+    V1.1.1-US(交易日護欄,P2):今天美東是不是 NYSE 交易日?
+
+    根治「國定假日仍觸發掃描寫 Notion」的問題(對應台股已修補的同類議題)。
+    用 exchange-calendars 的 NYSE(XNYS)行事曆,自動處理:
+      - 固定/浮動假日(國慶、感恩節、聖誕…)
+      - 週末
+      - 半日市(感恩節隔天、聖誕前夕 → 仍是交易日,額外標 half_day)
+
+    Args:
+        date_et: "YYYY-MM-DD"(美東日期);None 則用今日美東日期
+    回傳:
+        ok        : 行事曆是否成功載入(False = 套件缺/載入失敗 → fail-open)
+        is_session: 今天是否為交易日
+        half_day  : 是否為半日市(僅交易日有意義)
+        date      : 判斷的美東日期
+        reason    : 人類可讀說明
+    ⚠️ fail-open 設計:若 exchange-calendars 未安裝或載入失敗,回 ok=False
+       且 is_session=True(不擋),並印警告 — 寧可多跑一次,不可因套件問題漏掉
+       真正的交易日。但正常情況(套件可用)就是確定性護欄。
+    """
+    global _NYSE_CAL
+    if date_et is None:
+        date_et = datetime.now(ET_TZ).strftime('%Y-%m-%d')
+
+    try:
+        if _NYSE_CAL is None:
+            import exchange_calendars as xcals
+            _NYSE_CAL = xcals.get_calendar("XNYS")
+        cal = _NYSE_CAL
+
+        is_sess = bool(cal.is_session(date_et))
+        half = False
+        reason = "交易日"
+        if is_sess:
+            try:
+                close_et = cal.session_close(date_et).tz_convert("America/New_York")
+                if close_et.hour < 16:
+                    half = True
+                    reason = f"半日市(收 {close_et.strftime('%H:%M')} ET)"
+            except Exception:
+                pass
+        else:
+            reason = "休市(假日/週末)"
+
+        return {"ok": True, "is_session": is_sess, "half_day": half,
+                "date": date_et, "reason": reason}
+    except ImportError:
+        print("  ⚠️  exchange-calendars 未安裝 → 交易日護欄停用(fail-open,照常執行)")
+        print("     建議:pip install exchange-calendars")
+        return {"ok": False, "is_session": True, "half_day": False,
+                "date": date_et, "reason": "護欄停用(套件缺)"}
+    except Exception as e:
+        print(f"  ⚠️  交易日判斷失敗({e})→ fail-open,照常執行")
+        return {"ok": False, "is_session": True, "half_day": False,
+                "date": date_et, "reason": f"護欄異常: {e}"}
+
+
 # ==========================================================================
 # yfinance 核心(台股 V13.3.1/V13.6.0 原樣移植 — 跨市場通用)
 # ==========================================================================
