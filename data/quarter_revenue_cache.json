@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-06-13 14:56:53",
+ "generated_at": "2026-06-20 15:00:34",
  "source": "yfinance quarterly_income_stmt",
  "stocks": {
   "AAPL": {
@@ -15,9 +15,9 @@
    "quarters": 5
   },
   "ADBE": {
-   "yoy": 0.1197,
-   "latest_revenue": 6398000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.1269,
+   "latest_revenue": 6618000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "ADI": {
