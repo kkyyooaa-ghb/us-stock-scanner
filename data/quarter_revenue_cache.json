@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-06-20 15:00:34",
+ "generated_at": "2026-06-27 14:23:34",
  "source": "yfinance quarterly_income_stmt",
  "stocks": {
   "AAPL": {
@@ -387,9 +387,9 @@
    "quarters": 5
   },
   "MU": {
-   "yoy": 1.9629,
-   "latest_revenue": 23860000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 3.4572,
+   "latest_revenue": 41456000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "NFLX": {
