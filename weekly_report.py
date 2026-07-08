@@ -1,15 +1,18 @@
 """
-美股掃描週報(觀察期版)V1.0.0
+美股掃描週報 V1.1.0(完整校準版)
 ================================
 目的:觀察期的每週數據彙總 — 回答「精選 0 檔是否結構性?分數分布長怎樣?
      MIN_PRIORITY_FOR_GO=7 初始值該定哪?」這組問題。
-     等 P1(track_performance 回填)上線後,本報告升級為完整校準報告
-     (加 R 期望值 / 勝率 / n≥15 進度),對齊台股週日校準節奏。
+     V1.1.0(2026-07-08):P1 track_performance 已上線 → 新增「📐 校準報告」
+     區塊(R 期望值 / 勝率 / 停損率 / DistTag 分組 / 極端跳空分組),
+     對齊台股週日校準節奏;為 V1.2.0 計分核心重寫提供舊引擎 baseline。
 
 資料源:
   1. 本 repo 的 scan-result-* artifacts(GitHub API,內建 GITHUB_TOKEN,
      actions:read 即可,不需任何新憑證)— 每日全 99 檔分數
   2. Notion 美股掃描 DB(可選,讀 picks 累計數,失敗優雅跳過)
+  3. Notion 回填欄(V1.1.0 新增:R值/D+N報酬%/是否觸發停損,
+     由 track_performance.py 於本報告前一步驟寫入;失敗優雅跳過)
 
 去重:同一美東日多次執行(手動補跑)只取「最後一次」artifact。
 排程:weekly_report.yml 每週日 13:00 UTC = 台北 21:00(台北無 DST,恆定)。
@@ -270,9 +273,106 @@ def notion_sample_counts(week_start: str) -> dict:
 
 
 # ==========================================================================
+# 3.5 校準統計(V1.1.0:讀 track_performance 回填欄;失敗優雅)
+# ==========================================================================
+def notion_calibration_stats() -> dict:
+    """
+    讀全 DB 的回填欄,彙總:
+      n_total / n_r(R已回填筆數)/ r_mean / win_rate(R>0)/ stop_rate
+      avg_d1/d3/d5(平均報酬,百分點)
+      dist_stats:按 DistTag 分組的 (名稱, n, R均值),n 大到小
+      ext_gap / rest_gap:盤前極端跳空(|gap|≥5%)組 vs 其他組的 (n, R均值)
+    任何失敗 → ok=False(週報退回觀察期版,不炸)
+    """
+    token = os.environ.get("NOTION_TOKEN", "")
+    db_id = os.environ.get("NOTION_DB_ID", "")
+    if not token or not db_id:
+        return {"ok": False}
+
+    headers = {"Authorization": f"Bearer {token}",
+               "Notion-Version": "2022-06-28",
+               "Content-Type": "application/json"}
+    url = f"https://api.notion.com/v1/databases/{db_id}/query"
+
+    rows, cursor = [], None
+    try:
+        for _ in range(20):   # 上限 2000 筆
+            body = {"page_size": 100}
+            if cursor:
+                body["start_cursor"] = cursor
+            r = requests.post(url, headers=headers, json=body, timeout=15)
+            r.raise_for_status()
+            j = r.json()
+            for pg in j.get("results", []):
+                pr = pg.get("properties", {})
+
+                def _num(key):
+                    return pr.get(key, {}).get("number")
+
+                dist = (pr.get("DistTag", {}).get("select") or {}).get("name", "")
+                rows.append({
+                    "r":    _num("R值"),
+                    "d1":   _num("D+1報酬%"),
+                    "d3":   _num("D+3報酬%"),
+                    "d5":   _num("D+5報酬%"),
+                    "stop": bool(pr.get("是否觸發停損", {}).get("checkbox")),
+                    "dist": dist,
+                    "gap":  _num("盤前跳空%"),
+                })
+            if not j.get("has_more"):
+                break
+            cursor = j.get("next_cursor")
+    except Exception as e:
+        print(f"⚠️  校準統計讀取失敗(略過該段):{e}")
+        return {"ok": False}
+
+    n_total = len(rows)
+    rs = [x for x in rows if x["r"] is not None]
+    if not rs:
+        return {"ok": True, "n_total": n_total, "n_r": 0}
+
+    n_r     = len(rs)
+    r_vals  = [x["r"] for x in rs]
+    r_mean  = sum(r_vals) / n_r
+    win     = sum(1 for v in r_vals if v > 0) / n_r
+    stop_rt = sum(1 for x in rs if x["stop"]) / n_r
+
+    def _avg(key):
+        vals = [x[key] for x in rows if x[key] is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    groups = {}
+    for x in rs:
+        groups.setdefault(x["dist"] or "?", []).append(x["r"])
+    dist_stats = sorted(
+        ((k, len(v), sum(v) / len(v)) for k, v in groups.items()),
+        key=lambda t: -t[1],
+    )
+
+    is_ext = lambda x: x["gap"] is not None and abs(x["gap"]) >= 5
+    ext  = [x["r"] for x in rs if is_ext(x)]
+    rest = [x["r"] for x in rs if not is_ext(x)]
+
+    return {
+        "ok":         True,
+        "n_total":    n_total,
+        "n_r":        n_r,
+        "r_mean":     r_mean,
+        "win_rate":   win,
+        "stop_rate":  stop_rt,
+        "avg_d1":     _avg("d1"),
+        "avg_d3":     _avg("d3"),
+        "avg_d5":     _avg("d5"),
+        "dist_stats": dist_stats,
+        "ext_gap":    (len(ext),  sum(ext)  / len(ext))  if ext  else None,
+        "rest_gap":   (len(rest), sum(rest) / len(rest)) if rest else None,
+    }
+
+
+# ==========================================================================
 # 4. 組訊息 + 推播
 # ==========================================================================
-def build_message(agg: dict, notion: dict,
+def build_message(agg: dict, notion: dict, calib: dict,
                   week_start: str, week_end: str) -> str:
     daily = agg["daily"]
     n_days = len(daily)
@@ -283,7 +383,8 @@ def build_message(agg: dict, notion: dict,
 
     avg = lambda k: sum(d[k] for d in daily) / n_days
 
-    lines = [f"<b>📋 美股掃描週報(觀察期)</b>  {week_start} ~ {week_end}",
+    phase = "校準期" if (calib or {}).get("n_r", 0) > 0 else "觀察期"
+    lines = [f"<b>📋 美股掃描週報({phase})</b>  {week_start} ~ {week_end}",
              f"掃描天數 <b>{n_days}</b> | 日均分析 {avg('n'):.0f} 檔", "",
              "<b>分數分布(日均)</b>",
              f"  ≥7 達門檻:{avg('ge7'):.1f} 檔(週總 {agg['total_ge7']})",
@@ -319,6 +420,35 @@ def build_message(agg: dict, notion: dict,
         lines.append("<b>Notion 樣本</b>  讀取略過")
     lines.append("")
 
+    # ── 校準報告(V1.1.0:P1 回填上線後啟用)──
+    calib = calib or {}
+    if calib.get("ok") and calib.get("n_r", 0) > 0:
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append("<b>📐 校準報告</b>(R模擬:D+5收盤出場/觸停損-1R)")
+        prog = "✅ 已達門檻" if calib["n_r"] >= 15 else f"{calib['n_r']}/15"
+        lines.append(f"  已定案 <b>{calib['n_r']}</b>/{calib['n_total']} 筆 | "
+                     f"校準樣本 {prog}")
+        lines.append(f"  R期望值 <b>{calib['r_mean']:+.2f}</b> | "
+                     f"勝率 {calib['win_rate']:.0%} | "
+                     f"停損率 {calib['stop_rate']:.0%}")
+        d_parts = [f"D+{n} {v:+.2f}%"
+                   for n, v in ((1, calib.get("avg_d1")),
+                                (3, calib.get("avg_d3")),
+                                (5, calib.get("avg_d5")))
+                   if v is not None]
+        if d_parts:
+            lines.append(f"  平均報酬:{' | '.join(d_parts)}")
+        if calib.get("dist_stats"):
+            parts = [f"{name} n={n} R{rm:+.2f}"
+                     for name, n, rm in calib["dist_stats"][:4]]
+            lines.append(f"  按位階:{' | '.join(parts)}")
+        if calib.get("ext_gap") and calib.get("rest_gap"):
+            en, er = calib["ext_gap"]
+            rn, rr = calib["rest_gap"]
+            lines.append(f"  盤前極端跳空(|gap|≥5%):n={en} R{er:+.2f}"
+                         f" vs 其他 n={rn} R{rr:+.2f}")
+        lines.append("")
+
     # ── 逢低布局診斷(第一步:②超賣反彈 + ③盤整低接 蒐證)──
     dip = agg.get("dip", {})
     if dip.get("available"):
@@ -341,8 +471,14 @@ def build_message(agg: dict, notion: dict,
             lines.append(f"  📉 <b>超賣反彈候選</b>:{names}")
         lines.append("")
 
-    # 觀察期判讀(規則式,不做主觀建議)
-    if agg["total_ge7"] == 0:
+    # 週報判讀(規則式,不做主觀建議)
+    if calib.get("ok") and calib.get("n_r", 0) >= 15:
+        lines.append("💡 <i>校準樣本已達 n≥15 且 R 已回填 — D8 門檻已過,"
+                     "可依上方位階/跳空分組差異啟動 V1.2.0 計分核心校準。</i>")
+    elif calib.get("ok") and calib.get("n_r", 0) > 0:
+        lines.append("💡 <i>P1 回填已上線,校準樣本累積中 — "
+                     "達 n≥15 後即可啟動計分核心校準(D8:數據先、規則後)。</i>")
+    elif agg["total_ge7"] == 0:
         lines.append("💡 <i>本週 0 檔達 7 分門檻。法人腿停用下,達標僅剩"
                      "「吸籌+季營收+主題」一路;6 分常客即是門檻定值的候選證據。"
                      "累積 2 週以上分布後再議 MIN_PRIORITY_FOR_GO(D8:數據先、規則後)。</i>")
@@ -373,7 +509,8 @@ def main():
                                         "eq6_regulars": [], "warn_regulars": [],
                                         "total_ge7": 0}
     notion = notion_sample_counts(week_start)
-    msg = build_message(agg, notion, week_start, week_end)
+    calib  = notion_calibration_stats()
+    msg = build_message(agg, notion, calib, week_start, week_end)
 
     print("─" * 40 + "\n" + msg.replace("<b>", "").replace("</b>", "")
           .replace("<i>", "").replace("</i>", "").replace("&lt;", "<") + "\n" + "─" * 40)
