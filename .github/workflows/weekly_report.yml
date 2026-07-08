@@ -1,13 +1,15 @@
-name: 美股掃描週報(觀察期)
+name: 美股掃描週報(校準版)
 
-# V1.0.0(2026-06-11)
+# V1.1.0(2026-07-08):P1 track_performance 上線
 # ═══════════════════════════════════════════════════════════════
 # 每週日 13:00 UTC = 台北 21:00(台北無 DST,此換算恆定,單 cron 即可)
 # 對齊台股「週日 21:00 校準提醒」節奏。
+# 步驟順序(V1.1.0 新增第 1 步):
+#   1. track_performance.py — 回填 Notion 績效欄(掃描日收盤價/D+N報酬%/
+#      R值/是否觸發停損);continue-on-error,回填失敗不擋週報
+#   2. weekly_report.py — 觀察期彙總 + 📐 校準報告(R期望值/勝率/停損率)
 # 資料源:本 repo 的 scan-result artifacts(內建 GITHUB_TOKEN,actions:read,
-#        不需任何新憑證)+ Notion 樣本計數(讀同一組 secrets,失敗優雅)
-# 觀察期版內容:分數分布 / Top5 / 6分常客 / Notion n/15 進度
-# 升級路線:P1(track_performance 回填)上線後 → 加 R 期望值/勝率成完整校準報告
+#        不需任何新憑證)+ Notion 樣本計數與回填欄(同一組 secrets,失敗優雅)
 # ═══════════════════════════════════════════════════════════════
 
 on:
@@ -34,7 +36,14 @@ jobs:
           cache: 'pip'
 
       - name: 安裝相依套件
-        run: pip install pandas requests
+        run: pip install pandas requests yfinance
+
+      - name: P1 績效回填(track_performance)
+        continue-on-error: true    # 回填失敗不擋週報(週報端讀不到會優雅跳過)
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+        run: python track_performance.py
 
       - name: 產出並推播週報
         env:
