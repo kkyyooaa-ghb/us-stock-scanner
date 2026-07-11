@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-07-04 14:24:01",
+ "generated_at": "2026-07-11 14:19:06",
  "source": "yfinance quarterly_income_stmt",
  "stocks": {
   "AAPL": {
@@ -447,9 +447,9 @@
    "quarters": 5
   },
   "PEP": {
-   "yoy": 0.085,
-   "latest_revenue": 19443000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.064,
+   "latest_revenue": 24181000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "PLTR": {
