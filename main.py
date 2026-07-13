@@ -15,6 +15,8 @@
   🔁 時區:所有「當日」判斷改美東 ET;Notion 護欄窗改 is_in_scan_window()
   🔁 季營收 YoY 取代月營收(讀同一 cache 介面,鍵名相容)
   ⚠️ D8:評分/燈號規則為台股形狀起點,未經美股校準;調整需 P9 樣本 n≥15
+  🆕 V1.2.0(2026-07-13,D9):計分核心換「逢低三腿」(analyzers.py),
+      主迴圈重排 — DistTag/RSI/季營收 前移至計分之前(否決與止穩判定需要)
 ═══════════════════════════════════════════════════════════════
 """
 import pandas as pd
@@ -73,7 +75,7 @@ def _premarket_gap_note(gap_pct: float) -> str:
 def run_scanner():
     start_time = time.time()
     print(f"\n{'='*55}")
-    print(f"🚀 美股盤前掃描 V1.0.0-US  {get_et_time()} ET / {get_tw_time()} 台北")
+    print(f"🚀 美股盤前掃描 V1.2.0-US  {get_et_time()} ET / {get_tw_time()} 台北")
     print(f"{'='*55}\n")
 
     # ========== 交易日護欄(V1.1.1,P2)— 根治假日仍寫 Notion ==========
@@ -215,8 +217,39 @@ def run_scanner():
                 ticker, inst_cache.get(ticker)
             )
 
+            # ══ V1.2.0(D9)重排:DistTag/RSI/季營收 前移至計分核心之前 ══
+            # DistTag(ATR 倍數動態)+ 進場/停損
+            dist_to_ma60 = (price - ma60) / ma60 if ma60 > 0 else 0
+            dist_tag, dist_direction, dist_atr_mult = classify_dist_tag(
+                price=price, ma60=ma60, atr=atr
+            )
+            entry_low, entry_high, stop_loss = calculate_entry_stop_levels(
+                price=price, ma60=ma60, atr=atr,
+                dist_tag=dist_tag, direction=dist_direction
+            )
+
+            # 診斷欄(V1.1.0 起純記錄;V1.2.0 計分核心另行判定不共用旗標,
+            # 讓診斷欄定義跨週可比較 — 研究通道與生產通道分離)
+            rsi      = calculate_rsi(hist, period=14)
+            rsi_prev = calculate_rsi(hist.iloc[:-1], period=14) if len(hist) > 15 else -1.0
+            dip = diagnose_dip_setup(
+                close=hist, vol=vol, price=price, ma20=ma20, ma60=ma60,
+                rsi=rsi, rsi_prev=rsi_prev, vol_ratio=vol_ratio, dist_tag=dist_tag,
+            )
+
+            # 季營收(D3;V1.2.0 提前取得 — YoY 供計分核心基本面否決)
+            mr = get_quarter_revenue_score(ticker)
+            yoy_val = mr["yoy"] if mr.get("ok") else None
+
+            prev_close_v = float(hist.iloc[-2]) if len(hist) >= 2 else 0.0
+            day_low_v    = float(low.iloc[-1])  if len(low) > 0   else 0.0
+
+            # ── 計分核心(V1.2.0,D9:逢低三腿 + YoY否決 + 吸籌降 0)──
             status, priority = determine_status(
-                position, broker_info, vol_ratio, is_black_k
+                position, broker_info, vol_ratio, is_black_k,
+                dist_tag=dist_tag, rsi=rsi,
+                price=price, prev_close=prev_close_v, day_low=day_low_v,
+                ma20=ma20, ma60=ma60, yoy=yoy_val,
             )
 
             five_day_high = round(float(high.tail(5).max()), 2) if len(high) >= 5 else price
@@ -231,11 +264,10 @@ def run_scanner():
                 ]
                 broker_note = " | " + "、".join(names)
 
-            # ========== 季營收 YoY 加分(D3,原 P4 月營收位) ==========
+            # ========== 季營收 YoY 加分(D3,原 P4 月營收位;mr 已於上方取得) ==========
             # cache 介面與台股版相同;組合拳(法人腿)在 US v1 stub 下自然不觸發
             mr_note = ""
             mr_score = 0
-            mr = get_quarter_revenue_score(ticker)
             if mr.get("ok"):
                 mr_score = mr["score"]
                 max_consec = broker_info.get("max_consec_days", 0)
@@ -246,25 +278,6 @@ def run_scanner():
                 priority += mr_score
                 if mr.get("tag"):
                     mr_note = f" | {mr['tag']}({mr['yoy']*100:+.1f}%)"
-
-            # DistTag(ATR 倍數動態)+ 進場/停損
-            dist_to_ma60 = (price - ma60) / ma60 if ma60 > 0 else 0
-            dist_tag, dist_direction, dist_atr_mult = classify_dist_tag(
-                price=price, ma60=ma60, atr=atr
-            )
-            entry_low, entry_high, stop_loss = calculate_entry_stop_levels(
-                price=price, ma60=ma60, atr=atr,
-                dist_tag=dist_tag, direction=dist_direction
-            )
-
-            # ── 觀察期診斷(第一步,D8:純記錄不計分,為第二階段計分腿蒐證)──
-            rsi      = calculate_rsi(hist, period=14)
-            rsi_prev = calculate_rsi(hist.iloc[:-1], period=14) if len(hist) > 15 else -1.0
-            dip = diagnose_dip_setup(
-                close=hist, vol=vol, price=price, ma20=ma20, ma60=ma60,
-                rsi=rsi, rsi_prev=rsi_prev, vol_ratio=vol_ratio, dist_tag=dist_tag,
-            )
-            # ───────────────────────────────────────────────────────────
 
             results.append({
                 'Ticker':      ticker,
@@ -517,7 +530,7 @@ def run_scanner():
         stale_line = ("<i>⚠️ 非盤前排程時段執行,資料非當日盤前即時</i>\n\n")
 
     msg = (
-        f"<b>📊 美股盤前監控 V1.0.0-US  {get_tw_time()} 台北</b>\n"
+        f"<b>📊 美股盤前監控 V1.2.0-US  {get_tw_time()} 台北</b>\n"
         f"<i>{get_et_time()} ET</i>\n\n"
         f"{stale_line}"
         f"{macro_block}"

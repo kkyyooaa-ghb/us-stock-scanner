@@ -16,8 +16,11 @@
       L2 改「SPY 盤前情境+小型股偏弱」,L3 不變(甜點價計數)
   ✅ 原樣移植:analyze_institutional_for_stock(吃 stub 空資料自動 no-op)、
       calculate_atr、get_effective_atr、classify_dist_tag、
-      calculate_entry_stop_levels、classify_stock_position、determine_status
+      calculate_entry_stop_levels、classify_stock_position
       — 純技術核心,跨市場通用,一行未改(含 V13.9.6 ATR floor、V13.7.0 方向)
+  🔁 V1.2.0(2026-07-13,D9):determine_status 重寫為「逢低布局三腿」
+      (③盤整低接+10 / ②超賣止穩+7 / 守均線拉回+5,YoY<0 否決,吸籌降 0 分)
+      — 依第一份校準報告(n=20,R−0.26/勝率20%)拍板,詳見函式 docstring
 ═══════════════════════════════════════════════════════════════
 """
 import pandas as pd
@@ -751,37 +754,82 @@ def classify_stock_position(
 
 
 def determine_status(position: str, broker_info: dict,
-                     vol_ratio: float, is_black_k: bool) -> tuple[str, int]:
-    """原樣移植。US v1 註:法人 stub 下 hits/consec 恆為 0,
-    法人相關分支自然不觸發;量比 + 位階分支照常運作。"""
+                     vol_ratio: float, is_black_k: bool, *,
+                     dist_tag: str = "", rsi: float = -1.0,
+                     price: float = 0.0, prev_close: float = 0.0,
+                     day_low: float = 0.0, ma20: float = 0.0,
+                     ma60: float = 0.0, yoy=None) -> tuple[str, int]:
+    """
+    V1.2.0 計分核心(D9,2026-07-13 重寫)— 逢低布局三腿取代死掉的法人引擎。
+
+    重寫依據(數據先、規則後):
+      - 第一份校準報告(2026-07-12,n=20):舊「爆量吸籌」主導精選
+        R期望值 −0.26、勝率 20%、停損率 25%;半數歷史精選為已偏離追高名單
+      - 三週分布:超賣反彈原設計(RSI 精準上穿+量縮同日)四週零命中 → 廢棄;
+        盤整低接候選每週 5~30 次穩定存在
+      - 方向衝突實證:回檔週(07-06~07-12)舊引擎達門檻掉到 0.8 檔/日,
+        盤整低接命中卻暴增至 30 — 市場給逢低機會時舊引擎正好熄火
+
+    新計分(逢低三腿,由高至低互斥;YoY<0 基本面否決,無資料不擋):
+      ③ 盤整甜點位(低接)+10:consolidate + 量縮<0.7 + 🎯甜點價
+      ② 低檔超賣反彈      +7:low/transition_low + RSI<35 + 止穩(+量縮 +1)
+         守均線健康拉回    +5:當日回測 MA20/MA60 不破(低點觸及、收盤守住)+ 翻紅
+      🔥 靈魂吸籌:+3 → 0 純標記(量能方向與逢低布局相反,baseline 判退場;
+         標記保留供 R 數據日後翻案)
+    保留:隔日沖/假明牌/高檔出貨等法人反向分支(US stub 下休眠,接源後甦醒)。
+    移除:台股 consec 連買正分分支(法人腿 D6 停用後為死碼)。
+    """
     hits        = broker_info.get("key_broker_hits", [])
     consec      = broker_info.get("max_consec_days", 0)
     day_trader  = broker_info.get("day_trader_warn", False)
 
+    # ── 反向警訊(保留;US v1 法人 stub 下休眠)──
     if day_trader:
         return ("🎯 隔日沖警訊｜避開", -10)
-
     if hits and is_black_k:
         return ("⚠️ 假明牌(買超收黑 K)", -5)
-
     if position == "high" and consec >= Config.HIGH_BUY_DAYS:
         return ("⚠️ 高檔出貨警訊", -8)
 
-    if position == "consolidate" and consec >= Config.CONSOLIDATE_BUY_DAYS:
-        if vol_ratio < 1.0:
-            return ("🍦 盤整甜點位｜量能平淡", 7)
-        return ("🍦 盤整甜點位｜主力吸籌", 10)
+    # ── 共用旗標 ──
+    vol_dry    = bool(0 < vol_ratio < Config.DIP_VOL_DRY_RATIO)
+    turn_red   = bool(prev_close > 0 and price > prev_close)          # 翻紅
+    stabilized = bool((prev_close > 0 and price >= prev_close)        # ②止穩:
+                      or (ma60 > 0 and price >= ma60))                # 收不破前收 或 守月線
 
-    if position == "low" and consec >= Config.LOW_BUY_DAYS:
-        return ("🌱 低檔摸底｜停損 5%", 7)
+    # ── 逢低三腿(先判型態,再過基本面否決)──
+    leg = None
+    if position == "consolidate" and vol_dry and "甜點價" in dist_tag:
+        # ③ 盤整甜點位(低接):位置對 + 量縮(賣壓衰竭)
+        leg = ("📐 盤整甜點位｜量縮低接", Config.SCORE_CONSOLIDATION_DIP)
+    elif (position in ("low", "transition_low")
+            and 0 <= rsi < Config.DIP_RSI_OVERSOLD and stabilized):
+        # ② 低檔超賣反彈:超賣區止穩(非精準上穿);量縮為加分項
+        score = Config.SCORE_OVERSOLD_BOUNCE
+        label = f"📉 低檔超賣反彈｜RSI {rsi:.0f} 止穩"
+        if vol_dry:
+            score += Config.DIP_OVERSOLD_VOL_DRY_BONUS
+            label += "+量縮"
+        leg = (label, score)
+    elif turn_red and day_low > 0 and "已偏離" not in dist_tag:
+        # 守均線健康拉回:當日低點觸及 MA(容忍 +0.5%)但收盤守住 + 翻紅
+        tested_ma20 = (ma20 > 0 and day_low <= ma20 * 1.005 and price >= ma20)
+        tested_ma60 = (ma60 > 0 and day_low <= ma60 * 1.005 and price >= ma60)
+        if tested_ma20 or tested_ma60:
+            which = "MA20" if tested_ma20 else "MA60"
+            leg = (f"🌤️ 守均線拉回｜回測{which}不破",
+                   Config.SCORE_HEALTHY_PULLBACK)
 
-    if position == "transition_high" and consec >= Config.CONSOLIDATE_BUY_DAYS:
-        return ("🌤️ 強勢延伸｜輕倉跟進", 5)
+    if leg is not None:
+        # 基本面否決(D9):YoY<0 型態再好也不給分(標注供週報驗證否決運作)
+        if (Config.DIP_REQUIRE_YOY_NON_NEGATIVE
+                and yoy is not None and yoy < 0):
+            return (f"🚧 {leg[0]}｜YoY衰退否決", 0)
+        return leg
 
-    if position == "transition_low" and consec >= Config.LOW_BUY_DAYS:
-        return ("⏸️ 築底中｜觀察反轉", 5)
-
-    if vol_ratio > Config.THRESHOLD_VOL_RATIO and position in ("consolidate", "low", "transition_low"):
-        return ("🔥 靈魂吸籌", 3)
+    # ── 🔥 靈魂吸籌:D9 降為純標記(baseline R−0.26/勝率20%,爆量≠逢低)──
+    if (vol_ratio > Config.THRESHOLD_VOL_RATIO
+            and position in ("consolidate", "low", "transition_low")):
+        return ("🔥 靈魂吸籌(觀察標記)", Config.SCORE_SOUL_ACCUMULATION)
 
     return ("🔎 觀望", 0)
