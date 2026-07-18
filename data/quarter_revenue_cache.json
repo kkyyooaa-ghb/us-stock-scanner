@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-07-11 14:19:06",
+ "generated_at": "2026-07-18 14:16:01",
  "source": "yfinance quarterly_income_stmt",
  "stocks": {
   "AAPL": {
@@ -87,9 +87,9 @@
    "quarters": 5
   },
   "ASML": {
-   "yoy": 0.1325,
-   "latest_revenue": 8766900000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.2125,
+   "latest_revenue": 9326500000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "AVGO": {
@@ -219,9 +219,9 @@
    "quarters": 5
   },
   "FAST": {
-   "yoy": 0.1237,
-   "latest_revenue": 2201700000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.1474,
+   "latest_revenue": 2386900000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "FER": {
