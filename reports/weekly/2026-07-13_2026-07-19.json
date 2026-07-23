@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-07-19T14:17:00+00:00",
+  "period": {
+    "start": "2026-07-13",
+    "end": "2026-07-19",
+    "timezone": "America/New_York"
+  },
+  "sources": {
+    "scan_csv": [],
+    "notion_database": "37c323c3fc0180d3a84acdea1a5ca2af",
+    "telegram": "historical_screenshot",
+    "verification": "notion_recomputed"
+  },
+  "scan": {
+    "days": 5,
+    "average_analyzed": 96,
+    "score_distribution_daily": {
+      "ge7": 16.4,
+      "eq6": 1.6,
+      "eq5": 1.4,
+      "between3and4": 7.0,
+      "negative": 6.0
+    },
+    "total_ge7": 82
+  },
+  "notion_samples": {
+    "week_count": 50,
+    "total_count": 94
+  },
+  "calibration": {
+    "n_total": 94,
+    "n_r": 21,
+    "r_mean": -0.2980952380952381,
+    "win_rate": 0.19047619047619047,
+    "stop_rate": 0.2857142857142857,
+    "avg_d1": -0.9885714285714284,
+    "avg_d3": -2.993428571428571,
+    "avg_d5": -2.6277419354838703,
+    "dist_stats": [
+      ["🎯 甜點價", 17, -0.45058823529411773],
+      ["📍 偏離待回 ↑", 3, 0.5866666666666666],
+      ["📍 偏離待回 ↓", 1, -0.36]
+    ],
+    "ext_gap": [8, -0.1525],
+    "rest_gap": [13, -0.38769230769230767]
+  },
+  "archive_status": {
+    "markdown": true,
+    "json": true,
+    "daily_csv": false,
+    "daily_csv_note": "Historical Actions artifacts were not available during reconstruction."
+  }
+}

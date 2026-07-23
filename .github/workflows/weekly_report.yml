@@ -1,13 +1,15 @@
 name: 美股掃描週報(校準版)
 
+# V1.2.0(2026-07-23):週報 Markdown/JSON + 每日 CSV 永久提交 reports/
 # V1.1.0(2026-07-08):P1 track_performance 上線
 # ═══════════════════════════════════════════════════════════════
 # 每週日 13:00 UTC = 台北 21:00(台北無 DST,此換算恆定,單 cron 即可)
 # 對齊台股「週日 21:00 校準提醒」節奏。
-# 步驟順序(V1.1.0 新增第 1 步):
+# 步驟順序:
 #   1. track_performance.py — 回填 Notion 績效欄(掃描日收盤價/D+N報酬%/
 #      R值/是否觸發停損);continue-on-error,回填失敗不擋週報
-#   2. weekly_report.py — 觀察期彙總 + 📐 校準報告(R期望值/勝率/停損率)
+#   2. weekly_report.py — 彙總 + 📐 校準報告 + reports/永久檔
+#   3. commit reports/ — Markdown/JSON/每日 CSV 成為 Git 可追溯資料
 # 資料源:本 repo 的 scan-result artifacts(內建 GITHUB_TOKEN,actions:read,
 #        不需任何新憑證)+ Notion 樣本計數與回填欄(同一組 secrets,失敗優雅)
 # ═══════════════════════════════════════════════════════════════
@@ -18,7 +20,7 @@ on:
   workflow_dispatch:        # 手動測試用
 
 permissions:
-  contents: read
+  contents: write            # 永久提交 reports/週報與每日 CSV
   actions: read             # 讀取 artifacts 所需
 
 jobs:
@@ -53,3 +55,16 @@ jobs:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python weekly_report.py
+
+      - name: 永久保存週報與每日 CSV
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/
+          if git diff --cached --quiet; then
+            echo "reports 無變動,跳過 commit"
+          else
+            git commit -m "report: weekly calibration $(date -u +'%Y-%m-%d')"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
