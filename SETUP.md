@@ -1,62 +1,85 @@
-# us-stock-scanner V1.0.0-US 部署手冊
+# us-stock-scanner V1.2.0 部署與排程手冊
 
-血統:台股 stock-scanner V13.13.8 → 架構2移植(決策紀錄見 config.py docstring D1–D8)
+血統：台股 stock-scanner V13.13.8 → 架構 2 美股移植；目前正式版本與進度請見
+`PROGRESS_2026-07-23.md`。
 
-## 1. 新 repo 檔案清單
+## 1. 核心檔案
 
-| 檔案 | 來源 |
+| 類別 | 檔案 |
 |------|------|
-| `config.py` `sources.py` `analyzers.py` `main.py` `outputs.py` | 本次產出(美股版) |
-| `requirements.txt` | 本次產出 |
-| `.github/workflows/scan.yml` `.github/workflows/seed_revenue.yml` | 本次產出 |
-| `llm_enrichment.py` | **從台股 repo 原樣複製**(架構通用;Tavily query 用代號,美股代號直接可用) |
-| `data/quarter_revenue_cache.json` | 你 2026-06-11 已 seed 的檔,先 commit 進去(之後週六自動更新) |
+| 掃描與分析 | `config.py`、`sources.py`、`analyzers.py`、`main.py`、`outputs.py` |
+| 校準與週報 | `track_performance.py`、`weekly_report.py`、`reports/` |
+| 排程 | `.github/workflows/scan.yml`、`scan_watchdog.yml`、`seed_revenue.yml`、`weekly_report.yml` |
+| 資料 | `data/quarter_revenue_cache.json` |
 
-⚠️ 不要複製台股的:`seed_*.py`、其他 workflows、`backtest_picks.py`(P9 回測引擎之後另出美股版)。
+## 2. GitHub Secrets
 
-## 2. GitHub Secrets(Settings → Secrets and variables → Actions)
+設定位置：Settings → Secrets and variables → Actions。
 
-| Secret | 值 |
-|--------|-----|
-| `NOTION_TOKEN` | 與台股同一個 integration token 即可(integration 須對「美股掃描」DB 有存取權:DB 頁面 → ⋯ → Connections 加入) |
-| `NOTION_DB_ID` | `37c323c3fc0180d3a84acdea1a5ca2af` ← **美股掃描 DB,勿用台股的** |
-| `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` | 沿用(同一個 bot/頻道,訊息標頭已區分「美股盤前監控」) |
-| `GEMINI_API_KEY` / `TAVILY_API_KEY` | 沿用台股的 |
+| Secret | 用途 |
+|--------|------|
+| `NOTION_TOKEN` | Notion integration token；須授權「美股掃描」DB |
+| `NOTION_DB_ID` | `37c323c3fc0180d3a84acdea1a5ca2af` |
+| `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` | 掃描與週報推播 |
+| `GEMINI_API_KEY` / `TAVILY_API_KEY` | LLM enrichment |
 
-不需要:`FINMIND_TOKEN`、`TWELVEDATA_TOKEN`(US 版已移除)。
+不需要 `FINMIND_TOKEN`、`TWELVEDATA_TOKEN`。
 
-## 3. 排程(V1.0.1 起:GitHub 雙 cron,免設定)
+## 3. 正式排程
 
-**主方案(已內建於 scan.yml,推上去即生效,零額外設定)**:
-- 雙 cron `13:07 / 14:07 UTC` + gate job 只放行「09:xx ET」那一發
-- DST 換季全自動;另一發 3 秒內跳過(Actions 列表看到 gate-skipped 是正常的)
-- 取 :07 錯峰,降低 GitHub 整點壅塞的延遲/漏跑率
+### 盤前掃描
 
-**備援方案(若觀察期內 GitHub schedule 漏跑再啟用)**:cron-job.org
-- URL `https://api.github.com/repos/<OWNER>/<REPO>/actions/workflows/scan.yml/dispatches`
-- POST、Headers `Authorization: Bearer <PAT(Actions: R/W)>`、`Accept: application/vnd.github+json`
-- Body `{"ref":"main"}`、時區 `America/New_York`、平日 09:00
-- 啟用後可把 scan.yml 的 schedule 區塊註解掉避免重複觸發
+- 主觸發：cron-job.org，週一至週五 09:00 ET，呼叫 `scan.yml` 的
+  `workflow_dispatch`。
+- 備援：`scan_watchdog.yml` 在 09:15、09:25 ET 檢查當日執行紀錄。
+  找到成功、排隊中或執行中的掃描就不動作；找不到或只有失敗紀錄才補觸發。
+- watchdog 同時保留 EDT/EST 兩組 UTC cron，並由 `America/New_York`
+  offset gate 只放行當季正確的一組。
+- `scan.yml` 使用 concurrency，同一時間只允許一個掃描執行，避免主觸發與
+  備援競態造成重複寫入。
+- 程式仍有交易日、半日市與 08:30～09:30 ET 寫入護欄。
 
-季營收 seed 維持 GitHub schedule(週六,週頻不受 DST 影響)。
+cron-job.org 設定：
 
-## 4. 美股休市日(2026 下半年,cron-job.org 手動停一次或忽略該日訊息)
+- URL：`https://api.github.com/repos/kkyyooaa-ghb/us-stock-scanner/actions/workflows/scan.yml/dispatches`
+- Method：`POST`
+- Headers：`Authorization: Bearer <PAT>`、`Accept: application/vnd.github+json`
+- Body：`{"ref":"main"}`
+- 時區：`America/New_York`
+- 排程：週一至週五 09:00
 
-06/19 六月節、07/03 國慶(補)、09/07 勞動節、11/26 感恩節、12/25 聖誕節。
-(待辦 P:加 `exchange-calendars` 護欄讓程式自動跳過,等系統穩定後再做)
+PAT 必須能執行 Actions workflow。
 
-## 5. 首次啟用順序
+### 資料與報告
 
-1. repo 建好、secrets 設好、`data/quarter_revenue_cache.json` commit 進去
-2. GitHub UI 手動跑一次 `scan.yml`(非排程時段:**不勾** force → 驗 TG 推播;確認後可勾 force 補寫一筆 Notion 驗 DB)
-3. 確認 Notion「美股掃描」出現 `YYYY-MM-DD_<Ticker>` 紀錄、欄位齊全
-4. 推上 V1.0.1 scan.yml 後排程即自動生效 → 隔個交易日美東 09:07 看自動推播
-5. 之後進入觀察期:**只收集、不調參**(D8:任何權重調整等 n≥15)
+- 季營收 cache：每週六 13:00 UTC 執行 `seed_revenue.yml`。
+- 校準週報：每週日 13:00 UTC 執行 `weekly_report.yml`。
+- seed 與 weekly report 共用 repo-write concurrency，避免同時提交產生競態。
+- 週報預設只產生最近完整的週一～週日。歷史重跑須手動提供週日
+  `report_week_end`，非週日或未來日期會拒絕。
 
-## 6. 已知待辦(依優先序)
+## 4. 手動執行
 
-- **P1** `track_performance` 美股版:回填 掃描日收盤價 / D+1/D+3/D+5 報酬% / R值 / 是否觸發停損(DB 欄已建好)
-- **P2** 休市日護欄(exchange-calendars)
-- **P3** `backtest_picks` 美股版(P9 回測引擎;累積樣本後才有意義)
-- **P4** 方向 C:開盤後 5–15 分補掃「真實開盤量結構」(等美股 P9 證明量結構有用再做)
-- **P5** 成分異動維護:Nasdaq 每年 12 月重組 → 更新 config SCAN_POOL → 重跑 seed
+`scan.yml` 提供兩個獨立選項：
+
+- `force_notion_sync`：允許在正常寫入時窗外補寫 Notion。
+- `force_run`：允許休市日執行掃描；僅限測試，平常不要勾。
+
+一般手動診斷兩者都不勾。若只想確認 watchdog 判定，可手動執行
+`scan_watchdog.yml` 並維持 `force_dispatch=false`，此模式只檢查、不補跑。
+
+## 5. 首次或變更後驗證
+
+1. 確認 Secrets 與 cron-job.org PAT 有效。
+2. 交易日 09:00 ET 確認 `scan.yml` 被主排程觸發。
+3. 09:15/09:25 ET 確認 watchdog 找到健康 run 並跳過補跑。
+4. 確認 Telegram 推播、Notion `YYYY-MM-DD_<Ticker>` 紀錄與
+   `scan-result-*` artifact。
+5. 週日確認 `reports/latest.md`、`reports/latest.json` 與週別封存已提交。
+
+## 6. 待辦
+
+- P3：累積足夠樣本後建立美股版 `backtest_picks`。
+- P4：評估開盤後 5～15 分鐘的真實量價補掃。
+- P5：維護 Nasdaq 年度成分異動並重跑 seed。
+- 補齊 2026-07-06～2026-07-12 的歷史校準資料；來源不足時不得推估補造。

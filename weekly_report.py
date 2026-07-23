@@ -43,8 +43,8 @@ REPORT_ROOT = Path(__file__).resolve().parent / "reports"
 # ==========================================================================
 # 1. 抓本週 artifacts
 # ==========================================================================
-def fetch_week_artifacts() -> list[dict]:
-    """列出近 7 天的 scan-result artifacts,回傳 [{id, created_at, et_date}]"""
+def fetch_week_artifacts(week_start: str, week_end: str) -> list[dict]:
+    """列出指定完整週的 scan-result artifacts,回傳 [{id, created_at, et_date}]"""
     repo  = os.environ.get("GITHUB_REPOSITORY", "")
     token = os.environ.get("GITHUB_TOKEN", "")
     if not repo or not token:
@@ -62,7 +62,6 @@ def fetch_week_artifacts() -> list[dict]:
         print(f"⚠️  列 artifacts 失敗:{e}")
         return []
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     out = []
     for a in items:
         if not a.get("name", "").startswith("scan-result-"):
@@ -74,12 +73,13 @@ def fetch_week_artifacts() -> list[dict]:
                               .replace(tzinfo=timezone.utc)
         except Exception:
             continue
-        if created < cutoff:
+        et_date = created.astimezone(ET_TZ).strftime("%Y-%m-%d")
+        if not week_start <= et_date <= week_end:
             continue
         out.append({
             "id":         a["id"],
             "created_at": created,
-            "et_date":    created.astimezone(ET_TZ).strftime("%Y-%m-%d"),
+            "et_date":    et_date,
         })
 
     # 同一美東日只取最後一次(手動補跑去重)
@@ -89,7 +89,8 @@ def fetch_week_artifacts() -> list[dict]:
         if cur is None or a["created_at"] > cur["created_at"]:
             by_date[a["et_date"]] = a
     deduped = sorted(by_date.values(), key=lambda x: x["et_date"])
-    print(f"📦 近 7 天 artifacts:{len(out)} 個 → 去重後 {len(deduped)} 個交易日")
+    print(f"📦 {week_start}~{week_end} artifacts:{len(out)} 個"
+          f" → 去重後 {len(deduped)} 個交易日")
     return deduped
 
 
@@ -252,7 +253,7 @@ def _aggregate_dip(days: list[tuple[str, "pd.DataFrame"]]) -> dict:
 # ==========================================================================
 # 3. Notion 樣本累計(可選,失敗優雅)
 # ==========================================================================
-def notion_sample_counts(week_start: str) -> dict:
+def notion_sample_counts(week_start: str, week_end: str) -> dict:
     """回傳 {ok, week_count, total_count};任何失敗 → ok=False"""
     token = os.environ.get("NOTION_TOKEN", "")
     db_id = os.environ.get("NOTION_DB_ID", "")
@@ -281,8 +282,20 @@ def notion_sample_counts(week_start: str) -> dict:
         return total
 
     try:
-        week = _count({"filter": {"property": "掃描日期",
-                                  "date": {"on_or_after": week_start}}})
+        week = _count({
+            "filter": {
+                "and": [
+                    {
+                        "property": "掃描日期",
+                        "date": {"on_or_after": week_start},
+                    },
+                    {
+                        "property": "掃描日期",
+                        "date": {"on_or_before": week_end},
+                    },
+                ]
+            }
+        })
         total = _count({})
         return {"ok": True, "week_count": week, "total_count": total}
     except Exception as e:
@@ -601,13 +614,41 @@ def write_report_files(message: str, agg: dict, notion: dict, calib: dict,
     ]
 
 
+def resolve_report_period(now_et=None, requested_week_end: str = "") -> tuple[str, str]:
+    """
+    預設永遠取最近一個完整週一～週日，避免週中手動執行覆蓋 latest。
+    手動指定時只接受週日且不可是未來日期。
+    """
+    now_et = now_et or datetime.now(ET_TZ)
+    if requested_week_end:
+        try:
+            end_date = datetime.strptime(requested_week_end, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError("REPORT_WEEK_END 必須是 YYYY-MM-DD") from exc
+        if end_date.weekday() != 6:
+            raise ValueError("REPORT_WEEK_END 必須是週日(完整週結束日)")
+        if end_date > now_et.date():
+            raise ValueError("REPORT_WEEK_END 不可晚於目前美東日期")
+    else:
+        days_since_sunday = (now_et.weekday() + 1) % 7
+        end_date = now_et.date() - timedelta(days=days_since_sunday)
+
+    start_date = end_date - timedelta(days=6)
+    return start_date.isoformat(), end_date.isoformat()
+
+
 def main():
-    now_et = datetime.now(ET_TZ)
-    week_end   = now_et.strftime("%Y-%m-%d")
-    week_start = (now_et - timedelta(days=6)).strftime("%Y-%m-%d")
+    requested_week_end = os.environ.get("REPORT_WEEK_END", "").strip()
+    try:
+        week_start, week_end = resolve_report_period(
+            datetime.now(ET_TZ), requested_week_end
+        )
+    except ValueError as exc:
+        print(f"❌ 週報區間設定錯誤:{exc}")
+        raise SystemExit(2)
     print(f"📋 週報區間(ET):{week_start} ~ {week_end}")
 
-    arts = fetch_week_artifacts()
+    arts = fetch_week_artifacts(week_start, week_end)
     days = []
     archived_csv_files = []
     for a in arts:
@@ -622,7 +663,7 @@ def main():
     agg = aggregate(days) if days else {"daily": [], "top5": [],
                                         "eq6_regulars": [], "warn_regulars": [],
                                         "total_ge7": 0}
-    notion = notion_sample_counts(week_start)
+    notion = notion_sample_counts(week_start, week_end)
     calib  = notion_calibration_stats()
     msg = build_message(agg, notion, calib, week_start, week_end)
     report_files = write_report_files(

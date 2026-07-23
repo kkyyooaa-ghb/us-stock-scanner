@@ -17,7 +17,17 @@ name: 美股掃描週報(校準版)
 on:
   schedule:
     - cron: '0 13 * * 0'   # 週日 13:00 UTC = 台北 21:00(恆定)
-  workflow_dispatch:        # 手動測試用
+  workflow_dispatch:
+    inputs:
+      report_week_end:
+        description: '指定完整週結束日(必須是週日 YYYY-MM-DD；留空取最近完整週)'
+        type: string
+        required: false
+        default: ''
+
+concurrency:
+  group: repo-generated-writes
+  cancel-in-progress: false
 
 permissions:
   contents: write            # 永久提交 reports/週報與每日 CSV
@@ -26,10 +36,10 @@ permissions:
 jobs:
   report:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: 取出程式碼
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: 設定 Python 3.11
         uses: actions/setup-python@v6
@@ -54,6 +64,7 @@ jobs:
           NOTION_DB_ID:     ${{ secrets.NOTION_DB_ID }}
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPORT_WEEK_END:  ${{ inputs.report_week_end }}
         run: python weekly_report.py
 
       - name: 永久保存週報與每日 CSV
@@ -64,7 +75,8 @@ jobs:
           if git diff --cached --quiet; then
             echo "reports 無變動,跳過 commit"
           else
-            git commit -m "report: weekly calibration $(date -u +'%Y-%m-%d')"
+            report_end=$(python -c "import json; print(json.load(open('reports/latest.json', encoding='utf-8'))['period']['end'])")
+            git commit -m "report: weekly calibration ${report_end}"
             git pull --rebase origin main
             git push origin HEAD:main
           fi

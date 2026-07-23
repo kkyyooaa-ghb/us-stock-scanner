@@ -17,6 +17,10 @@ on:
     - cron: '0 13 * * 6'   # 每週六 13:00 UTC(週頻不受 DST 錯位影響)
   workflow_dispatch:        # 財報季後手動補跑 / GitHub UI 手動觸發
 
+concurrency:
+  group: repo-generated-writes
+  cancel-in-progress: false
+
 jobs:
   seed:
     runs-on: ubuntu-latest
@@ -24,7 +28,7 @@ jobs:
     permissions:
       contents: write   # 需要 commit cache 檔案
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v6

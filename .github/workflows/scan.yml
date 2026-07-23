@@ -29,6 +29,15 @@ on:
         type: boolean
         required: false
         default: false
+      force_run:
+        description: '休市日仍強制掃描(測試用,會消耗 API；平常勿勾)'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: us-stock-scan
+  cancel-in-progress: false
 
 jobs:
   scan:
@@ -39,7 +48,7 @@ jobs:
 
     steps:
       - name: 取出程式碼
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: 設定 Python 3.11
         uses: actions/setup-python@v6
@@ -58,7 +67,8 @@ jobs:
           TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
           TAVILY_API_KEY:    ${{ secrets.TAVILY_API_KEY }}
-          FORCE_NOTION_SYNC: ${{ github.event.inputs.force_notion_sync }}
+          FORCE_NOTION_SYNC: ${{ inputs.force_notion_sync }}
+          FORCE_RUN:         ${{ inputs.force_run }}
         run: python main.py
 
       - name: 確保結果檔存在

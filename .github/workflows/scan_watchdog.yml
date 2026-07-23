@@ -1,0 +1,135 @@
+name: 美股盤前掃描備援監控
+
+# cron-job.org 仍是 09:00 ET 主觸發。
+# 本 workflow 在 09:15 / 09:25 ET 檢查 scan.yml:
+# - 已成功、排隊中或執行中 → 不動作
+# - 沒有執行或最近一次失敗 → workflow_dispatch 備援補跑
+# 雙 UTC cron 配合 ET offset gate，自動處理 EDT/EST；非當季那組立即跳過。
+
+on:
+  schedule:
+    - cron: '15,25 13 * * 1-5'  # EDT 對應 09:15/09:25 ET
+    - cron: '15,25 14 * * 1-5'  # EST 對應 09:15/09:25 ET
+  workflow_dispatch:
+    inputs:
+      force_dispatch:
+        description: '找不到今日有效掃描時立即補觸發(手動測試預設只檢查)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: us-stock-scan-watchdog
+  cancel-in-progress: true
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 判斷本次 UTC cron 是否對應 09:xx ET
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_EXPR: ${{ github.event.schedule }}
+          FORCE_DISPATCH: ${{ inputs.force_dispatch }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime, time, timezone
+          from zoneinfo import ZoneInfo
+
+          et = ZoneInfo("America/New_York")
+          now = datetime.now(et)
+          event = os.environ.get("EVENT_NAME", "")
+          schedule = os.environ.get("SCHEDULE_EXPR", "")
+          offset = now.strftime("%z")
+
+          active = event == "workflow_dispatch" or (
+              schedule == "15,25 13 * * 1-5" and offset == "-0400"
+          ) or (
+              schedule == "15,25 14 * * 1-5" and offset == "-0500"
+          )
+          allow_dispatch = event == "schedule" or (
+              os.environ.get("FORCE_DISPATCH", "").lower() == "true"
+          )
+          scan_start = datetime.combine(now.date(), time(8, 30), tzinfo=et)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"active={str(active).lower()}\n")
+              f.write(f"allow_dispatch={str(allow_dispatch).lower()}\n")
+              f.write(
+                  "scan_start_utc="
+                  + scan_start.astimezone(timezone.utc).isoformat()
+                  + "\n"
+              )
+          print(
+              f"event={event} schedule={schedule} ET_offset={offset} "
+              f"active={active} allow_dispatch={allow_dispatch}"
+          )
+          PY
+
+      - name: 檢查主掃描並在缺跑／失敗時補觸發
+        if: steps.gate.outputs.active == 'true'
+        id: check
+        uses: actions/github-script@v9
+        env:
+          SCAN_START_UTC: ${{ steps.gate.outputs.scan_start_utc }}
+          ALLOW_DISPATCH: ${{ steps.gate.outputs.allow_dispatch }}
+        with:
+          retries: 3
+          result-encoding: string
+          script: |
+            const { owner, repo } = context.repo;
+            const cutoff = Date.parse(process.env.SCAN_START_UTC);
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id: "scan.yml",
+              event: "workflow_dispatch",
+              branch: "main",
+              per_page: 30,
+            });
+
+            const healthy = data.workflow_runs.find((run) => {
+              const isToday = Date.parse(run.created_at) >= cutoff;
+              const notFinished = run.status !== "completed";
+              return isToday && (notFinished || run.conclusion === "success");
+            });
+
+            if (healthy) {
+              core.info(
+                `今日已有有效掃描 run=${healthy.id} ` +
+                `status=${healthy.status} conclusion=${healthy.conclusion}`
+              );
+              core.setOutput("dispatched", "false");
+              return `healthy:${healthy.id}`;
+            }
+
+            if (process.env.ALLOW_DISPATCH !== "true") {
+              core.warning("今日找不到有效掃描；手動檢查模式不自動補跑");
+              core.setOutput("dispatched", "false");
+              return "missing:dry-run";
+            }
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: "scan.yml",
+              ref: "main",
+              inputs: {
+                force_notion_sync: "true",
+                force_run: "false",
+              },
+            });
+            core.warning("主觸發缺跑或失敗，已用 watchdog 補觸發 scan.yml");
+            core.setOutput("dispatched", "true");
+            return "fallback:dispatched";
+
+      - name: 非當季 UTC 排程略過
+        if: steps.gate.outputs.active != 'true'
+        run: echo "此 UTC cron 不對應目前 09:xx ET，正常略過"
