@@ -1,5 +1,5 @@
 """
-美股掃描週報 V1.2.0(完整校準版 + 永久歸檔)
+美股掃描週報 V1.2.1(分代引擎校準 + 永久歸檔)
 ================================
 目的:觀察期的每週數據彙總 — 回答「精選 0 檔是否結構性?分數分布長怎樣?
      MIN_PRIORITY_FOR_GO=7 初始值該定哪?」這組問題。
@@ -8,6 +8,8 @@
      對齊台股週日校準節奏;為 V1.2.0 計分核心重寫提供舊引擎 baseline。
      V1.2.0(2026-07-23):週報 Markdown/JSON + 每日完整 CSV 永久保存至
      reports/,Telegram 降為同源推播端,不再是唯一週報來源。
+     V1.2.1(2026-07-27):校準樣本依 Status 策略前綴切分世代；D8 門檻
+     只採 V1.2.0 新引擎 R 樣本，舊 🔥 引擎僅保留為 baseline。
 
 資料源:
   1. 本 repo 的 scan-result-* artifacts(GitHub API,內建 GITHUB_TOKEN,
@@ -38,6 +40,9 @@ except Exception:
 
 GH_API = "https://api.github.com"
 REPORT_ROOT = Path(__file__).resolve().parent / "reports"
+CALIBRATION_MIN_R = 15
+V12_STATUS_PREFIXES = ("📐", "📉", "🌤️")
+LEGACY_STATUS_PREFIXES = ("🔥",)
 
 
 # ==========================================================================
@@ -304,8 +309,68 @@ def notion_sample_counts(week_start: str, week_end: str) -> dict:
 
 
 # ==========================================================================
-# 3.5 校準統計(V1.1.0:讀 track_performance 回填欄;失敗優雅)
+# 3.5 校準統計(V1.2.1:依策略世代切分;失敗優雅)
 # ==========================================================================
+def calibration_engine(status: str) -> str:
+    """依 Status 的第一個策略標記辨識計分引擎世代。"""
+    value = (status or "").lstrip()
+    if value.startswith(V12_STATUS_PREFIXES):
+        return "v1_2"
+    if value.startswith(LEGACY_STATUS_PREFIXES):
+        return "legacy"
+    return "unclassified"
+
+
+def summarize_calibration_rows(rows: list[dict]) -> dict:
+    """把單一世代或全體 Notion rows 彙總成可輸出、可測試的校準統計。"""
+    n_total = len(rows)
+    rs = [x for x in rows if x.get("r") is not None]
+    if not rs:
+        return {"n_total": n_total, "n_r": 0}
+
+    n_r = len(rs)
+    r_vals = [x["r"] for x in rs]
+
+    def _avg(key):
+        vals = [x.get(key) for x in rows if x.get(key) is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    groups = {}
+    for x in rs:
+        groups.setdefault(x.get("dist") or "?", []).append(x["r"])
+    dist_stats = sorted(
+        ((k, len(v), sum(v) / len(v)) for k, v in groups.items()),
+        key=lambda t: -t[1],
+    )
+
+    def _is_extreme_gap(row):
+        gap = row.get("gap")
+        return gap is not None and abs(gap) >= 5
+
+    ext = [x["r"] for x in rs if _is_extreme_gap(x)]
+    rest = [x["r"] for x in rs if not _is_extreme_gap(x)]
+
+    return {
+        "n_total":    n_total,
+        "n_r":        n_r,
+        "r_mean":     sum(r_vals) / n_r,
+        "win_rate":   sum(1 for v in r_vals if v > 0) / n_r,
+        "stop_rate":  sum(1 for x in rs if x.get("stop")) / n_r,
+        "avg_d1":     _avg("d1"),
+        "avg_d3":     _avg("d3"),
+        "avg_d5":     _avg("d5"),
+        "dist_stats": dist_stats,
+        "ext_gap":    (len(ext), sum(ext) / len(ext)) if ext else None,
+        "rest_gap":   (len(rest), sum(rest) / len(rest)) if rest else None,
+    }
+
+
+def v12_calibration_ready(calib: dict) -> bool:
+    """D8 readiness 僅由 V1.2.0 新引擎的已定案 R 樣本決定。"""
+    v12 = (calib or {}).get("engine_stats", {}).get("v1_2", {})
+    return v12.get("n_r", 0) >= CALIBRATION_MIN_R
+
+
 def notion_calibration_stats() -> dict:
     """
     讀全 DB 的回填欄,彙總:
@@ -313,6 +378,7 @@ def notion_calibration_stats() -> dict:
       avg_d1/d3/d5(平均報酬,百分點)
       dist_stats:按 DistTag 分組的 (名稱, n, R均值),n 大到小
       ext_gap / rest_gap:盤前極端跳空(|gap|≥5%)組 vs 其他組的 (n, R均值)
+      engine_stats:V1.2.0 / 舊引擎 / 未分類的同型統計
     任何失敗 → ok=False(週報退回觀察期版,不炸)
     """
     token = os.environ.get("NOTION_TOKEN", "")
@@ -340,7 +406,16 @@ def notion_calibration_stats() -> dict:
                 def _num(key):
                     return pr.get(key, {}).get("number")
 
+                def _text(key):
+                    parts = pr.get(key, {}).get("rich_text", [])
+                    return "".join(
+                        x.get("plain_text")
+                        or x.get("text", {}).get("content", "")
+                        for x in parts
+                    )
+
                 dist = (pr.get("DistTag", {}).get("select") or {}).get("name", "")
+                status = _text("Status")
                 rows.append({
                     "r":    _num("R值"),
                     "d1":   _num("D+1報酬%"),
@@ -349,6 +424,8 @@ def notion_calibration_stats() -> dict:
                     "stop": bool(pr.get("是否觸發停損", {}).get("checkbox")),
                     "dist": dist,
                     "gap":  _num("盤前跳空%"),
+                    "status": status,
+                    "engine": calibration_engine(status),
                 })
             if not j.get("has_more"):
                 break
@@ -357,47 +434,14 @@ def notion_calibration_stats() -> dict:
         print(f"⚠️  校準統計讀取失敗(略過該段):{e}")
         return {"ok": False}
 
-    n_total = len(rows)
-    rs = [x for x in rows if x["r"] is not None]
-    if not rs:
-        return {"ok": True, "n_total": n_total, "n_r": 0}
-
-    n_r     = len(rs)
-    r_vals  = [x["r"] for x in rs]
-    r_mean  = sum(r_vals) / n_r
-    win     = sum(1 for v in r_vals if v > 0) / n_r
-    stop_rt = sum(1 for x in rs if x["stop"]) / n_r
-
-    def _avg(key):
-        vals = [x[key] for x in rows if x[key] is not None]
-        return sum(vals) / len(vals) if vals else None
-
-    groups = {}
-    for x in rs:
-        groups.setdefault(x["dist"] or "?", []).append(x["r"])
-    dist_stats = sorted(
-        ((k, len(v), sum(v) / len(v)) for k, v in groups.items()),
-        key=lambda t: -t[1],
-    )
-
-    is_ext = lambda x: x["gap"] is not None and abs(x["gap"]) >= 5
-    ext  = [x["r"] for x in rs if is_ext(x)]
-    rest = [x["r"] for x in rs if not is_ext(x)]
-
-    return {
-        "ok":         True,
-        "n_total":    n_total,
-        "n_r":        n_r,
-        "r_mean":     r_mean,
-        "win_rate":   win,
-        "stop_rate":  stop_rt,
-        "avg_d1":     _avg("d1"),
-        "avg_d3":     _avg("d3"),
-        "avg_d5":     _avg("d5"),
-        "dist_stats": dist_stats,
-        "ext_gap":    (len(ext),  sum(ext)  / len(ext))  if ext  else None,
-        "rest_gap":   (len(rest), sum(rest) / len(rest)) if rest else None,
+    result = {"ok": True, **summarize_calibration_rows(rows)}
+    result["engine_stats"] = {
+        engine: summarize_calibration_rows(
+            [row for row in rows if row["engine"] == engine]
+        )
+        for engine in ("v1_2", "legacy", "unclassified")
     }
+    return result
 
 
 # ==========================================================================
@@ -446,7 +490,7 @@ def build_message(agg: dict, notion: dict, calib: dict,
 
     if notion.get("ok"):
         lines.append(f"<b>Notion 樣本</b>  本週寫入 {notion['week_count']} 筆 | "
-                     f"累計 <b>{notion['total_count']}/15</b>(校準門檻)")
+                     f"累計 <b>{notion['total_count']}</b> 筆")
     else:
         lines.append("<b>Notion 樣本</b>  讀取略過")
     lines.append("")
@@ -456,12 +500,40 @@ def build_message(agg: dict, notion: dict, calib: dict,
     if calib.get("ok") and calib.get("n_r", 0) > 0:
         lines.append("━━━━━━━━━━━━━━━━━━")
         lines.append("<b>📐 校準報告</b>(R模擬:D+5收盤出場/觸停損-1R)")
-        prog = "✅ 已達門檻" if calib["n_r"] >= 15 else f"{calib['n_r']}/15"
-        lines.append(f"  已定案 <b>{calib['n_r']}</b>/{calib['n_total']} 筆 | "
-                     f"校準樣本 {prog}")
-        lines.append(f"  R期望值 <b>{calib['r_mean']:+.2f}</b> | "
+        lines.append(f"  全期已定案 <b>{calib['n_r']}</b>/{calib['n_total']} 筆")
+        engine_stats = calib.get("engine_stats", {})
+        v12 = engine_stats.get("v1_2", {})
+        legacy = engine_stats.get("legacy", {})
+        unknown = engine_stats.get("unclassified", {})
+        if engine_stats:
+            v12_progress = (
+                "✅ 已達門檻" if v12_calibration_ready(calib)
+                else f"{v12.get('n_r', 0)}/{CALIBRATION_MIN_R}"
+            )
+            lines.append(
+                f"  V1.2.0 已定案 <b>{v12.get('n_r', 0)}</b>/"
+                f"{v12.get('n_total', 0)} 筆 | D8 進度 {v12_progress}"
+            )
+            lines.append(
+                f"  舊引擎 baseline:{legacy.get('n_r', 0)}/"
+                f"{legacy.get('n_total', 0)} 筆"
+            )
+            if unknown.get("n_total", 0):
+                lines.append(
+                    f"  ⚠️ 未分類:{unknown.get('n_r', 0)}/"
+                    f"{unknown['n_total']} 筆(不計入 D8)"
+                )
+        else:
+            lines.append("  ⚠️ 引擎分代資料不可用，D8 不判定")
+        lines.append(f"  全期 R期望值 <b>{calib['r_mean']:+.2f}</b> | "
                      f"勝率 {calib['win_rate']:.0%} | "
                      f"停損率 {calib['stop_rate']:.0%}")
+        if v12.get("n_r", 0):
+            lines.append(
+                f"  V1.2.0 R期望值 <b>{v12['r_mean']:+.2f}</b> | "
+                f"勝率 {v12['win_rate']:.0%} | "
+                f"停損率 {v12['stop_rate']:.0%}"
+            )
         d_parts = [f"D+{n} {v:+.2f}%"
                    for n, v in ((1, calib.get("avg_d1")),
                                 (3, calib.get("avg_d3")),
@@ -472,11 +544,11 @@ def build_message(agg: dict, notion: dict, calib: dict,
         if calib.get("dist_stats"):
             parts = [f"{name} n={n} R{rm:+.2f}"
                      for name, n, rm in calib["dist_stats"][:4]]
-            lines.append(f"  按位階:{' | '.join(parts)}")
+            lines.append(f"  全期按位階:{' | '.join(parts)}")
         if calib.get("ext_gap") and calib.get("rest_gap"):
             en, er = calib["ext_gap"]
             rn, rr = calib["rest_gap"]
-            lines.append(f"  盤前極端跳空(|gap|≥5%):n={en} R{er:+.2f}"
+            lines.append(f"  全期盤前極端跳空(|gap|≥5%):n={en} R{er:+.2f}"
                          f" vs 其他 n={rn} R{rr:+.2f}")
         lines.append("")
 
@@ -503,12 +575,19 @@ def build_message(agg: dict, notion: dict, calib: dict,
         lines.append("")
 
     # 週報判讀(規則式,不做主觀建議)
-    if calib.get("ok") and calib.get("n_r", 0) >= 15:
-        lines.append("💡 <i>校準樣本已達 n≥15 且 R 已回填 — D8 門檻已過,"
+    v12_n_r = (
+        calib.get("engine_stats", {}).get("v1_2", {}).get("n_r", 0)
+        if calib.get("ok") else 0
+    )
+    if v12_calibration_ready(calib):
+        lines.append("💡 <i>V1.2.0 校準樣本已達 n≥15 且 R 已回填 — D8 門檻已過,"
                      "可依上方位階/跳空分組差異啟動 V1.2.0 計分核心校準。</i>")
     elif calib.get("ok") and calib.get("n_r", 0) > 0:
-        lines.append("💡 <i>P1 回填已上線,校準樣本累積中 — "
-                     "達 n≥15 後即可啟動計分核心校準(D8:數據先、規則後)。</i>")
+        lines.append(
+            f"💡 <i>V1.2.0 R 樣本累積中({v12_n_r}/{CALIBRATION_MIN_R});"
+            "舊引擎樣本只作 baseline,不計入 D8。"
+            "達門檻後再啟動權重與 MIN_PRIORITY_FOR_GO 校準。</i>"
+        )
     elif agg["total_ge7"] == 0:
         lines.append("💡 <i>本週 0 檔達 7 分門檻。法人腿停用下,達標僅剩"
                      "「吸籌+季營收+主題」一路;6 分常客即是門檻定值的候選證據。"
@@ -579,7 +658,7 @@ def write_report_files(message: str, agg: dict, notion: dict, calib: dict,
     )
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     snapshot = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at_utc": generated_at,
         "period": {"start": week_start, "end": week_end, "timezone": "America/New_York"},
         "sources": {
