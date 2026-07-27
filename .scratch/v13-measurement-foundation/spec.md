@@ -1,6 +1,6 @@
 # V1.3 量尺與規則基礎版
 
-Status: claimed
+Status: resolved
 
 ## 目標
 
@@ -83,6 +83,29 @@ Status: claimed
 - 拆股調整持股與價格水位；現金股息另計入持有期總損益。
 - 舊 22 筆 R 標記為 `legacy-v0`，不得與 V1.3 量尺合併。
 
+## Episode 與樣本成熟度
+
+- 每日原始訊號永久保存在 `reports/daily/`；episode 去重不刪除來源。
+- 一檔 ticker 同時只允許一個活躍 episode。首筆訊號凍結 selected leg、
+  order type 與 TradePlan，後續同股訊號在生命週期內只增加 signal count。
+- 即使後續 selected leg 改變，只記入 `EpisodeObservedLegs`，不在等待成交或
+  持倉期間建立第二筆交易。
+- episode 結束條件：
+  - 未成交：entry window 最後一個交易日。
+  - 已成交：停損、gap-through 或 D+40 時間出場日。
+  - 日線雙路徑：等樂觀路徑也定案後才關閉。
+  - `invalid_plan`／`no_data`：當日關閉，避免資料錯誤永久吞掉後續訊號。
+- 下一筆訊號日期必須晚於 episode end 才能建立新 episode；同日補跑仍合併。
+- KPI 報告 filled、unfilled、awaiting、open、completed、ambiguous，
+  並按 canonical selected leg 與 order type 分層。
+- 調參閘門：
+  - 全體至少 60 筆 completed-R episodes 才允許評估參數，100 筆為目標。
+  - 腿別／order type 至少各 20 筆 completed-R，且全體閘門已通過，
+    才標記該 segment 為 tuning-ready。
+  - 閘門只授權分析，不會自動修改任何權重。
+- 每週輸出 `shadow_episodes.csv`、`shadow_episode_summary.json` 與
+  `shadow_episode_summary.md`。
+
 ## 驗收條件
 
 1. 三條正式腿均有結構化 decision，不再依賴 emoji 解析。
@@ -92,6 +115,9 @@ Status: claimed
 5. 不改變 V1.2 `Status`、Priority、Top 10 與 Notion 正式欄位。
 6. CSV 保存版本、腿別、分數拆解、TradePlan、環境與 PreGapPct。
 7. 新介面有單元測試，舊週報測試持續通過。
+8. 同一 ticker 的生命週期內重複訊號只形成一個 episode。
+9. Episode 報告能分層顯示腿別、order type 與 R 上下界。
+10. 未達 60 筆 completed-R 前，調參閘門保持關閉。
 
 ## 非目標
 

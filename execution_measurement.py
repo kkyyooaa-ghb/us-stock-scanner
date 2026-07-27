@@ -52,6 +52,8 @@ class TradeMeasurement:
     ending_split_factor: float = 1.0
     bars_observed: int = 0
     entry_window_complete: bool = False
+    entry_window_end_date: str | None = None
+    lifecycle_end_date: str | None = None
     reason: str = ""
 
     def to_snapshot_fields(self) -> dict[str, Any]:
@@ -77,6 +79,8 @@ class TradeMeasurement:
             "V13EndingSplitFactor": self.ending_split_factor,
             "V13BarsObserved": self.bars_observed,
             "V13EntryWindowComplete": int(self.entry_window_complete),
+            "V13EntryWindowEndDate": self.entry_window_end_date,
+            "V13LifecycleEndDate": self.lifecycle_end_date,
             "V13MeasurementReason": self.reason,
         }
 
@@ -363,6 +367,11 @@ def evaluate_trade_plan(
             break
 
     entry_window_complete = len(frame) >= plan.valid_days
+    entry_window_end_date = (
+        frame.index[plan.valid_days - 1].strftime("%Y-%m-%d")
+        if entry_window_complete
+        else None
+    )
     if fill_pos is None:
         status = (
             MeasurementStatus.UNFILLED
@@ -372,6 +381,12 @@ def evaluate_trade_plan(
         return TradeMeasurement(
             status=status,
             entry_window_complete=entry_window_complete,
+            entry_window_end_date=entry_window_end_date,
+            lifecycle_end_date=(
+                entry_window_end_date
+                if status is MeasurementStatus.UNFILLED
+                else None
+            ),
             reason="entry_not_reached",
             **observed,
             **common,
@@ -389,6 +404,8 @@ def evaluate_trade_plan(
             exit_price=_round(fill_price),
             exit_reason="entry_at_or_below_stop",
             entry_window_complete=entry_window_complete,
+            entry_window_end_date=entry_window_end_date,
+            lifecycle_end_date=fill_date,
             reason="gap_open_invalidated_initial_risk",
             **observed,
             **common,
@@ -424,6 +441,8 @@ def evaluate_trade_plan(
             mfe_r=mfe_r,
             mae_r=mae_r,
             entry_window_complete=entry_window_complete,
+            entry_window_end_date=entry_window_end_date,
+            lifecycle_end_date=fill_date,
             **observed,
             **common,
         )
@@ -447,6 +466,11 @@ def evaluate_trade_plan(
         r_values = [-1.0]
         if path.r_value is not None:
             r_values.append(path.r_value)
+        resolution_date = (
+            frame.index[path.exit_pos].strftime("%Y-%m-%d")
+            if path.exit_pos is not None
+            else None
+        )
         return TradeMeasurement(
             status=(
                 MeasurementStatus.COMPLETED
@@ -465,6 +489,8 @@ def evaluate_trade_plan(
             mae_r=mae_r,
             dividends_per_initial_share=_round(path.dividends, 6) or 0.0,
             entry_window_complete=entry_window_complete,
+            entry_window_end_date=entry_window_end_date,
+            lifecycle_end_date=resolution_date,
             reason=(
                 "daily_bar_cannot_order_intraday_trigger_and_stop"
                 if path.complete
@@ -498,6 +524,8 @@ def evaluate_trade_plan(
         mae_r=mae_r,
         dividends_per_initial_share=_round(path.dividends, 6) or 0.0,
         entry_window_complete=entry_window_complete,
+        entry_window_end_date=entry_window_end_date,
+        lifecycle_end_date=exit_date,
         **observed,
         **common,
     )

@@ -44,6 +44,21 @@ IDENTITY_COLUMNS = (
     "UniverseVersion",
     "SelectedLeg",
     "OrderType",
+    "PlanSelectedLeg",
+    "PlanValidDays",
+    "PlanTimeExitDays",
+    "PriorityPreTheme",
+    "PriorityPostTheme",
+    "ThemeScore",
+    "CrossedThresholdDueToTheme",
+    "EnteredTop10DueToTheme",
+    "PreGapPct",
+    "MarketBias",
+    "VixLevel",
+    "SpyGapPct",
+    "QqqGapPct",
+    "BreadthPct",
+    "SmallCapWeak",
 )
 
 

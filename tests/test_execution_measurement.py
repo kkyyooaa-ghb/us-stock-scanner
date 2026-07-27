@@ -99,6 +99,7 @@ class OrderSemanticsTests(unittest.TestCase):
         self.assertEqual(-1.0, result.r_lower)
         self.assertEqual(1.0, result.r_upper)
         self.assertEqual("ambiguous_entry_stop_sequence", result.exit_reason)
+        self.assertEqual("2026-01-06", result.lifecycle_end_date)
 
     def test_future_gap_through_stop_uses_open_price(self):
         history = _history([
@@ -137,6 +138,7 @@ class CorporateActionTests(unittest.TestCase):
         self.assertEqual(2.0, result.ending_split_factor)
         self.assertEqual(0.9, result.r_lower)
         self.assertEqual(0.9, result.r_upper)
+        self.assertEqual("2026-01-06", result.lifecycle_end_date)
 
 
 class HorizonAndLifecycleTests(unittest.TestCase):
@@ -154,6 +156,8 @@ class HorizonAndLifecycleTests(unittest.TestCase):
 
         self.assertEqual(MeasurementStatus.UNFILLED, result.status)
         self.assertTrue(result.entry_window_complete)
+        self.assertEqual("2026-01-07", result.entry_window_end_date)
+        self.assertEqual("2026-01-07", result.lifecycle_end_date)
         self.assertIsNone(result.r_lower)
         self.assertIsNone(result.r_upper)
 
@@ -169,6 +173,7 @@ class HorizonAndLifecycleTests(unittest.TestCase):
         )
 
         self.assertEqual(MeasurementStatus.OPEN, result.status)
+        self.assertIsNone(result.lifecycle_end_date)
         self.assertIsNone(result.r_lower)
         self.assertIsNone(result.r_upper)
         self.assertEqual(0.5, result.mark_r)

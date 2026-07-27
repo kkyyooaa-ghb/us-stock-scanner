@@ -49,6 +49,9 @@ class Config:
     MEASUREMENT_VERSION          = "legacy-v0"
     SHADOW_MEASUREMENT_VERSION   = "v1.3.0-shadow"
     TRADE_PLAN_TIME_EXIT_DAYS    = 40
+    EPISODE_TUNING_MIN_COMPLETED = 60
+    EPISODE_TUNING_TARGET        = 100
+    EPISODE_SEGMENT_MIN_COMPLETED = 20
 
     # ========== API 金鑰 ==========
     NOTION_TOKEN     = os.environ.get("NOTION_TOKEN", "")
