@@ -28,6 +28,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Literal
 
 from config import Config
+from trade_plan import PlanAnchor, SignalDecision, SignalLeg
 from sources import (
     get_series, get_index_data, yf_close_series,
     get_institutional_for_stock,                 # stub:回空 df,函式自動 no-op
@@ -753,12 +754,12 @@ def classify_stock_position(
         return "transition_low"
 
 
-def determine_status(position: str, broker_info: dict,
-                     vol_ratio: float, is_black_k: bool, *,
-                     dist_tag: str = "", rsi: float = -1.0,
-                     price: float = 0.0, prev_close: float = 0.0,
-                     day_low: float = 0.0, ma20: float = 0.0,
-                     ma60: float = 0.0, yoy=None) -> tuple[str, int]:
+def determine_status_details(position: str, broker_info: dict,
+                             vol_ratio: float, is_black_k: bool, *,
+                             dist_tag: str = "", rsi: float = -1.0,
+                             price: float = 0.0, prev_close: float = 0.0,
+                             day_low: float = 0.0, ma20: float = 0.0,
+                             ma60: float = 0.0, yoy=None) -> SignalDecision:
     """
     V1.2.0 計分核心(D9,2026-07-13 重寫)— 逢低布局三腿取代死掉的法人引擎。
 
@@ -785,11 +786,11 @@ def determine_status(position: str, broker_info: dict,
 
     # ── 反向警訊(保留;US v1 法人 stub 下休眠)──
     if day_trader:
-        return ("🎯 隔日沖警訊｜避開", -10)
+        return SignalDecision("🎯 隔日沖警訊｜避開", -10)
     if hits and is_black_k:
-        return ("⚠️ 假明牌(買超收黑 K)", -5)
+        return SignalDecision("⚠️ 假明牌(買超收黑 K)", -5)
     if position == "high" and consec >= Config.HIGH_BUY_DAYS:
-        return ("⚠️ 高檔出貨警訊", -8)
+        return SignalDecision("⚠️ 高檔出貨警訊", -8)
 
     # ── 共用旗標 ──
     vol_dry    = bool(0 < vol_ratio < Config.DIP_VOL_DRY_RATIO)
@@ -799,9 +800,15 @@ def determine_status(position: str, broker_info: dict,
 
     # ── 逢低三腿(先判型態,再過基本面否決)──
     leg = None
+    candidate_leg = SignalLeg.NONE
+    anchor = PlanAnchor.NONE
+    anchor_price = 0.0
     if position == "consolidate" and vol_dry and "甜點價" in dist_tag:
         # ③ 盤整甜點位(低接):位置對 + 量縮(賣壓衰竭)
         leg = ("📐 盤整甜點位｜量縮低接", Config.SCORE_CONSOLIDATION_DIP)
+        candidate_leg = SignalLeg.CONSOLIDATION_DIP
+        anchor = PlanAnchor.MA60
+        anchor_price = ma60
     elif (position in ("low", "transition_low")
             and 0 <= rsi < Config.DIP_RSI_OVERSOLD and stabilized):
         # ② 低檔超賣反彈:超賣區止穩(非精準上穿);量縮為加分項
@@ -811,6 +818,8 @@ def determine_status(position: str, broker_info: dict,
             score += Config.DIP_OVERSOLD_VOL_DRY_BONUS
             label += "+量縮"
         leg = (label, score)
+        candidate_leg = SignalLeg.OVERSOLD_BOUNCE
+        anchor = PlanAnchor.PREVIOUS_HIGH
     elif turn_red and day_low > 0 and "已偏離" not in dist_tag:
         # 守均線健康拉回:當日低點觸及 MA(容忍 +0.5%)但收盤守住 + 翻紅
         tested_ma20 = (ma20 > 0 and day_low <= ma20 * 1.005 and price >= ma20)
@@ -819,17 +828,56 @@ def determine_status(position: str, broker_info: dict,
             which = "MA20" if tested_ma20 else "MA60"
             leg = (f"🌤️ 守均線拉回｜回測{which}不破",
                    Config.SCORE_HEALTHY_PULLBACK)
+            candidate_leg = SignalLeg.HEALTHY_PULLBACK
+            anchor = PlanAnchor.MA20 if tested_ma20 else PlanAnchor.MA60
+            anchor_price = ma20 if tested_ma20 else ma60
 
     if leg is not None:
         # 基本面否決(D9):YoY<0 型態再好也不給分(標注供週報驗證否決運作)
         if (Config.DIP_REQUIRE_YOY_NON_NEGATIVE
                 and yoy is not None and yoy < 0):
-            return (f"🚧 {leg[0]}｜YoY衰退否決", 0)
-        return leg
+            return SignalDecision(
+                status=f"🚧 {leg[0]}｜YoY衰退否決",
+                base_priority=0,
+                candidate_leg=candidate_leg,
+                selected_leg=SignalLeg.NONE,
+                leg_score_raw=leg[1],
+                veto_reason="negative_revenue_yoy",
+                anchor=anchor,
+                anchor_price=anchor_price,
+            )
+        return SignalDecision(
+            status=leg[0],
+            base_priority=leg[1],
+            candidate_leg=candidate_leg,
+            selected_leg=candidate_leg,
+            leg_score_raw=leg[1],
+            anchor=anchor,
+            anchor_price=anchor_price,
+        )
 
     # ── 🔥 靈魂吸籌:D9 降為純標記(baseline R−0.26/勝率20%,爆量≠逢低)──
     if (vol_ratio > Config.THRESHOLD_VOL_RATIO
             and position in ("consolidate", "low", "transition_low")):
-        return ("🔥 靈魂吸籌(觀察標記)", Config.SCORE_SOUL_ACCUMULATION)
+        return SignalDecision(
+            status="🔥 靈魂吸籌(觀察標記)",
+            base_priority=Config.SCORE_SOUL_ACCUMULATION,
+            candidate_leg=SignalLeg.LEGACY_ACCUMULATION,
+            leg_score_raw=Config.SCORE_SOUL_ACCUMULATION,
+        )
 
-    return ("🔎 觀望", 0)
+    return SignalDecision("🔎 觀望", 0)
+
+
+def determine_status(position: str, broker_info: dict,
+                     vol_ratio: float, is_black_k: bool, *,
+                     dist_tag: str = "", rsi: float = -1.0,
+                     price: float = 0.0, prev_close: float = 0.0,
+                     day_low: float = 0.0, ma20: float = 0.0,
+                     ma60: float = 0.0, yoy=None) -> tuple[str, int]:
+    """Compatibility adapter for callers that still expect ``(status, score)``."""
+    return determine_status_details(
+        position, broker_info, vol_ratio, is_black_k,
+        dist_tag=dist_tag, rsi=rsi, price=price, prev_close=prev_close,
+        day_low=day_low, ma20=ma20, ma60=ma60, yoy=yoy,
+    ).legacy_tuple()

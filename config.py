@@ -43,6 +43,12 @@ import os
 
 
 class Config:
+    # ========== 策略／量尺版本(V1.3 shadow) ==========
+    SIGNAL_ENGINE_VERSION        = "v1.2.0"
+    TRADE_PLAN_VERSION           = "v1.3.0-shadow"
+    MEASUREMENT_VERSION          = "legacy-v0"
+    TRADE_PLAN_TIME_EXIT_DAYS    = 40
+
     # ========== API 金鑰 ==========
     NOTION_TOKEN     = os.environ.get("NOTION_TOKEN", "")
     NOTION_DB_ID     = os.environ.get("NOTION_DB_ID", "")     # ⚠️ 美股新 DB,勿沿用台股 DB
@@ -86,6 +92,7 @@ class Config:
     ES_FUTURES_TICKER       = "ES=F"    # S&P 期貨(盤前宏觀方向)
     NQ_FUTURES_TICKER       = "NQ=F"    # Nasdaq 期貨(盤前宏觀方向)
     MARKET_PROXY_ETF        = "SPY"     # 大盤盤前報價代理(原 TWSE MIS 位)
+    MARKET_TECH_PROXY_ETF   = "QQQ"     # 科技股環境快照，不進正式評分
 
     # 大盤跳空分級(供 analyzers 跳空判讀;單位:百分比形式,1.0 = 1%)
     # ⚠️ 註:台股版 analyzers.py:1223 引用此二常數但 config 未定義(潛在
@@ -120,7 +127,7 @@ class Config:
 
     # ========== 個股盤前跳空(D7,新訊號) ==========
     # 實測:yfinance preMarketPrice 可靠(盤前「價」可得,「量」不可得)
-    # v1 只顯示、不進評分;美股 P9 樣本 n≥15 後再決定權重
+    # v1 只顯示、不進評分;V1.3 起保存完整掃描母體,不再只留 Top10。
     PREMARKET_GAP_ENABLED     = True
     PREMARKET_GAP_SIG_PCT     = 2.0    # |gap| ≥ 2% → 顯著跳空註記
     PREMARKET_GAP_EXTREME_PCT = 5.0    # |gap| ≥ 5% → 極端跳空(多為財報/事件日)
@@ -246,7 +253,9 @@ class Config:
     FINMIND_MAX_WORKERS = 5             # deprecated(US),保留避免引用崩潰
 
     # ========== LLM enrichment(P7.5 原樣移植 — 架構沿用,新聞源換美股) ==========
-    LLM_ENRICHMENT_ENABLED       = True
+    # V1.3 P0:舊模組仍搜尋台股來源。修正 query builder 前預設停用,
+    # 避免錯市場新聞影響人工判斷；可用 env 顯式開啟的能力也一併關閉。
+    LLM_ENRICHMENT_ENABLED       = False
     LLM_MODEL                    = "gemini-2.5-flash"
     LLM_NEWS_DAYS                = 3
     LLM_NEWS_MAX_RESULTS         = 5

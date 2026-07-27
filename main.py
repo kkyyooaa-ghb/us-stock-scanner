@@ -11,7 +11,7 @@
          → 精選盤前跳空(D7新訊號) → 燈號
   ❌ 移除:匯率區塊、期現貨區塊、融資 header、P7 量結構(D2 方向A)、
           除息扣點、三大法人批次抓取(stub 直回空,呼叫保留供未來接源)
-  ✅ 新增:精選檔盤前跳空標注(只對 df_go ≤10 檔呼叫,控 API 量)
+  ✅ 新增:盤前跳空標注(V1.3 起保存完整掃描母體,避免 Top10 選擇偏差)
   🔁 時區:所有「當日」判斷改美東 ET;Notion 護欄窗改 is_in_scan_window()
   🔁 季營收 YoY 取代月營收(讀同一 cache 介面,鍵名相容)
   ⚠️ D8:評分/燈號規則為台股形狀起點,未經美股校準;調整需 P9 樣本 n≥15
@@ -43,13 +43,19 @@ from analyzers import (
     analyze_macro,                                  # 取代 analyze_forex/futures
     analyze_market_open,
     analyze_institutional_for_stock,
-    classify_stock_position, determine_status,
+    classify_stock_position, determine_status_details,
     calculate_atr, calculate_entry_stop_levels,
     classify_dist_tag,
     calculate_rsi, diagnose_dip_setup,              # 觀察期診斷(第一步)
     analyze_otc_index,                              # 小型股 ^RUT
 )
 from outputs import sync_notion, send_telegram
+from snapshot_metadata import finalize_theme_metadata
+from trade_plan import (
+    build_shadow_trade_plan,
+    strategy_config_hash,
+    universe_version,
+)
 
 # LLM enrichment 獨立模組(失敗優雅,import 失敗不影響主流程 — 原 P7.5)
 try:
@@ -63,7 +69,7 @@ except ImportError as _llm_e:
 
 
 def _premarket_gap_note(gap_pct: float) -> str:
-    """D7:精選檔盤前跳空標注(v1 只顯示、不進評分;n≥15 後再定權重)"""
+    """D7:個股盤前跳空標注(v1 只顯示、不進評分;n≥15 後再定權重)"""
     if abs(gap_pct) >= Config.PREMARKET_GAP_EXTREME_PCT:
         return f"🚨 盤前極端跳空 {gap_pct:+.1f}%(多為財報/事件,謹慎)"
     if abs(gap_pct) >= Config.PREMARKET_GAP_SIG_PCT:
@@ -99,7 +105,7 @@ def run_scanner():
     # ========== 第一件事:盤前宏觀(原匯率+期現貨位) ==========
     macro = analyze_macro()
 
-    # ========== 第二件事:SPY 盤前(原 TWSE MIS 位) ==========
+    # ========== 第二件事:SPY / QQQ 盤前市場環境 ==========
     print("\n📊 抓取 SPY 盤前報價...")
     mis_data = get_market_premarket()
     if mis_data.get("ok"):
@@ -107,6 +113,13 @@ def run_scanner():
               f"{mis_data['gap_pct']:+.2f}%)  時間 {mis_data['trade_time']}")
     else:
         print(f"  ⚠️  SPY 盤前失敗:{mis_data.get('err', '')}")
+
+    qqq_data = get_premarket_quote(Config.MARKET_TECH_PROXY_ETF)
+    if qqq_data.get("ok"):
+        print(f"  QQQ {qqq_data['price']:,.2f} "
+              f"({qqq_data['gap_pct']:+.2f}%, {qqq_data['session']})")
+    else:
+        print(f"  ⚠️  QQQ 盤前失敗:{qqq_data.get('err', '')}")
 
     # 開盤情境(美股版真正接上 — 吃 SPY 盤前 gap;台股版此函式為死碼)
     market_open = analyze_market_open(mis_data)
@@ -157,6 +170,11 @@ def run_scanner():
     et_now        = datetime.now(ET_TZ)
     today_str     = et_now.strftime('%Y-%m-%d')
     market_closed = et_now.hour >= 17   # 美東 17:00 後視為收盤完整
+    snapshot_as_of_et = et_now.isoformat()
+    git_commit_sha = os.environ.get("GITHUB_SHA", "")[:40]
+    config_hash = strategy_config_hash()
+    universe_ver = universe_version()
+    smallcap_weak_snapshot = bool(otc_data.get("ok") and otc_data.get("weak"))
 
     for idx, ticker in enumerate(Config.SCAN_POOL, 1):
         try:
@@ -243,13 +261,26 @@ def run_scanner():
 
             prev_close_v = float(hist.iloc[-2]) if len(hist) >= 2 else 0.0
             day_low_v    = float(low.iloc[-1])  if len(low) > 0   else 0.0
+            previous_high_v = float(high.iloc[-2]) if len(high) >= 2 else 0.0
 
             # ── 計分核心(V1.2.0,D9:逢低三腿 + YoY否決 + 吸籌降 0)──
-            status, priority = determine_status(
+            signal_decision = determine_status_details(
                 position, broker_info, vol_ratio, is_black_k,
                 dist_tag=dist_tag, rsi=rsi,
                 price=price, prev_close=prev_close_v, day_low=day_low_v,
                 ma20=ma20, ma60=ma60, yoy=yoy_val,
+            )
+            status, priority = signal_decision.legacy_tuple()
+
+            # V1.3 shadow:腿別 TradePlan 只進快照,不改正式進場/停損與 Notion。
+            shadow_plan = build_shadow_trade_plan(
+                signal_decision,
+                price=price,
+                previous_high=previous_high_v,
+                day_low=day_low_v,
+                ma20=ma20,
+                ma60=ma60,
+                atr=atr,
             )
 
             five_day_high = round(float(high.tail(5).max()), 2) if len(high) >= 5 else price
@@ -279,6 +310,9 @@ def run_scanner():
                 if mr.get("tag"):
                     mr_note = f" | {mr['tag']}({mr['yoy']*100:+.1f}%)"
 
+            priority_pre_theme = priority
+            score_pre_theme = priority_pre_theme + vol_ratio
+
             results.append({
                 'Ticker':      ticker,
                 'Price':       price,
@@ -291,6 +325,16 @@ def run_scanner():
                 'Status':      status + broker_note + mr_note,
                 'Priority':    priority,
                 'Score':       priority + vol_ratio,
+                'PriorityPreTheme':  priority_pre_theme,
+                'PriorityPostTheme': priority_pre_theme,
+                'ScorePreTheme':     score_pre_theme,
+                'RankScore':         score_pre_theme,
+                'RevenueScore':      mr_score,
+                'ThemeScore':        0,
+                'EligiblePreTheme':  int(priority_pre_theme >= Config.MIN_PRIORITY_FOR_GO),
+                'EligiblePostTheme': int(priority_pre_theme >= Config.MIN_PRIORITY_FOR_GO),
+                'CrossedThresholdDueToTheme': 0,
+                'EnteredTop10DueToTheme':     0,
                 'ConsecDays':  broker_info.get("max_consec_days", 0),
                 'DistMA60Pct': round(dist_to_ma60 * 100, 1),
                 'DistTag':     dist_tag,
@@ -302,7 +346,34 @@ def run_scanner():
                 'DistDirection': dist_direction,
                 'DistATRMult':   round(dist_atr_mult, 2),
                 'YoY':           mr.get("yoy") if mr.get("ok") else None,
-                'PreGapPct':     None,   # D7:精選後才補抓(控 API 量)
+                'PreGapPct':     None,   # V1.3:完成全池分析後補抓
+                # ── V1.3 shadow:正式腿別與版本化決策 ──
+                'SignalEngineVersion': Config.SIGNAL_ENGINE_VERSION,
+                'MeasurementVersion':  Config.MEASUREMENT_VERSION,
+                'GitCommitSha':        git_commit_sha,
+                'ConfigHash':          config_hash,
+                'UniverseVersion':     universe_ver,
+                'SnapshotAsOfET':      snapshot_as_of_et,
+                'DataBarDate':         str(hist.index[-1].date()),
+                'CandidateLeg':        signal_decision.candidate_leg.value,
+                'SelectedLeg':         signal_decision.selected_leg.value,
+                'LegScoreRaw':         signal_decision.leg_score_raw,
+                'LegAnchor':           signal_decision.anchor.value,
+                'LegAnchorPrice':      signal_decision.anchor_price or None,
+                'VetoReason':          signal_decision.veto_reason,
+                # ── 可再生性低的市場環境 ──
+                'MarketBias':          macro.get("bias", "neutral"),
+                'VixLevel':            macro.get("vix_level"),
+                'SpyPrice':            mis_data.get("price") if mis_data.get("ok") else None,
+                'SpyPrevClose':        mis_data.get("prev_close") if mis_data.get("ok") else None,
+                'SpyGapPct':           mis_data.get("gap_pct") if mis_data.get("ok") else None,
+                'QqqPrice':            qqq_data.get("price") if qqq_data.get("ok") else None,
+                'QqqPrevClose':        qqq_data.get("prev_close") if qqq_data.get("ok") else None,
+                'QqqGapPct':           qqq_data.get("gap_pct") if qqq_data.get("ok") else None,
+                'EsFuturesPct':        macro.get("es_chg"),
+                'NqFuturesPct':        macro.get("nq_chg"),
+                'BreadthPct':          round(breadth_pct, 4),
+                'SmallCapWeak':        int(smallcap_weak_snapshot),
                 # ── 觀察期診斷欄(第一步,純記錄)──
                 'RSI':           rsi,
                 'VolDry':        int(dip["vol_dry"]),
@@ -311,6 +382,8 @@ def run_scanner():
                 'RsiTurnUp':     int(dip["rsi_turn_up"]),
                 'HoldMA':        int(dip["hold_ma"]),
                 'SetupType':     dip["setup_type"],
+                'DiagnosticSetupTypeV1': dip["setup_type"],
+                **shadow_plan.to_snapshot_fields(),
             })
 
             if idx % 20 == 0:
@@ -354,6 +427,7 @@ def run_scanner():
                 for i in idxs:
                     df_all.at[i, 'Score']    += boost
                     df_all.at[i, 'Priority'] += boost
+                    df_all.at[i, 'ThemeScore'] += boost
                     old_status = df_all.at[i, 'Status']
                     if theme_label not in old_status:
                         df_all.at[i, 'Status'] = old_status + f' | {theme_label}'
@@ -362,11 +436,15 @@ def run_scanner():
                         ticker_themes_map.setdefault(tk, []).append(theme_short)
                 print(f"  🎯 {theme_label}:{len(idxs)} 檔同時觸發 → 各 +{boost} 分")
 
-        df_all = df_all.sort_values('Score', ascending=False)
+        df_all = finalize_theme_metadata(
+            df_all,
+            min_priority=Config.MIN_PRIORITY_FOR_GO,
+            top_n=Config.TOP_N_RECOMMENDED,
+        )
 
     # ========== 精選 ==========
     df_go_raw = df_all[df_all['Priority'] >= Config.MIN_PRIORITY_FOR_GO]
-    df_go     = df_go_raw.head(Config.TOP_N_RECOMMENDED)
+    df_go     = df_go_raw.head(Config.TOP_N_RECOMMENDED).copy()
     df_warn   = df_all[df_all['Priority'] < 0]
 
     print(f"\n📊 分析結果:")
@@ -376,19 +454,24 @@ def run_scanner():
     for _, row in df_go.iterrows():
         print(f"  ✓ {row['Ticker']:8s}  {row['Price']:9.2f}  量比:{row['VolRatio']:.2f}  {row['Status']}")
 
-    # ========== D7:精選檔盤前跳空(只打 df_go ≤10 檔,控 API 量) ==========
-    if Config.PREMARKET_GAP_ENABLED and len(df_go) > 0:
-        print(f"\n⚡ 精選檔盤前跳空檢查({len(df_go)} 檔)...")
-        for i, row in df_go.iterrows():
+    # ========== V1.3:完整母體盤前跳空(不可回補的 forward 資料) ==========
+    if Config.PREMARKET_GAP_ENABLED and len(df_all) > 0:
+        print(f"\n⚡ 全掃描母體盤前跳空檢查({len(df_all)} 檔)...")
+        for i, row in df_all.iterrows():
             tk = row['Ticker']
             try:
                 q = get_premarket_quote(tk)
                 if q.get("ok") and q.get("session") == "premarket":
                     gp = q["gap_pct"]
-                    df_go.at[i, 'PreGapPct'] = gp
+                    df_all.at[i, 'PreGapPct'] = gp
+                    if i in df_go.index:
+                        df_go.at[i, 'PreGapPct'] = gp
                     note = _premarket_gap_note(gp)
                     if note:
-                        df_go.at[i, 'Status'] = row['Status'] + f" | {note}"
+                        new_status = row['Status'] + f" | {note}"
+                        df_all.at[i, 'Status'] = new_status
+                        if i in df_go.index:
+                            df_go.at[i, 'Status'] = new_status
                         print(f"  {tk:8s} {note}")
                     else:
                         print(f"  {tk:8s} 盤前 {gp:+.2f}%(平穩)")
@@ -592,7 +675,10 @@ if __name__ == "__main__":
             f.write("Ticker,Price,MA20,MA60,VolRatio,Support,Resistance,Position,Status,"
                     "Priority,Score,ConsecDays,DistMA60Pct,DistTag,EntryLow,EntryHigh,"
                     "StopLoss,ATR,ATR_Pct,DistDirection,DistATRMult,YoY,PreGapPct,"
-                    "RSI,VolDry,NearMA60,Oversold,RsiTurnUp,HoldMA,SetupType\n")
+                    "RSI,VolDry,NearMA60,Oversold,RsiTurnUp,HoldMA,SetupType,"
+                    "SignalEngineVersion,MeasurementVersion,CandidateLeg,SelectedLeg,"
+                    "LegScoreRaw,VetoReason,TradePlanStatus,TradePlanVersion,OrderType,"
+                    "PlanAnchor,TriggerPrice,PlanEntryLow,PlanEntryHigh,PlanStopLoss\n")
             f.write(f"ERROR,0,0,0,0,0,0,-,{type(e).__name__}: {e},-99,-99,0,0,-,0,0,0,0,0,,0,,,"
                     "-1,0,0,0,0,0,none\n")
         sys.exit(1)

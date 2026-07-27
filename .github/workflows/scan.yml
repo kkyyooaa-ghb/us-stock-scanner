@@ -75,7 +75,7 @@ jobs:
         if: always()
         run: |
           if [ ! -f scan_result.csv ]; then
-            echo "Ticker,Price,MA20,MA60,VolRatio,Support,Resistance,Position,Status,Priority,Score,ConsecDays,DistMA60Pct,DistTag,EntryLow,EntryHigh,StopLoss,ATR,ATR_Pct,DistDirection,DistATRMult,YoY,PreGapPct" > scan_result.csv
+            echo "Ticker,Price,MA20,MA60,VolRatio,Support,Resistance,Position,Status,Priority,Score,ConsecDays,DistMA60Pct,DistTag,EntryLow,EntryHigh,StopLoss,ATR,ATR_Pct,DistDirection,DistATRMult,YoY,PreGapPct,SignalEngineVersion,MeasurementVersion,CandidateLeg,SelectedLeg,LegScoreRaw,VetoReason,TradePlanStatus,TradePlanVersion,OrderType,PlanAnchor,TriggerPrice,PlanEntryLow,PlanEntryHigh,PlanStopLoss" > scan_result.csv
           fi
 
       - name: 上傳掃描結果
