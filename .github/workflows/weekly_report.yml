@@ -16,8 +16,8 @@ name: 美股掃描週報(校準版)
 # ═══════════════════════════════════════════════════════════════
 
 on:
-  schedule:
-    - cron: '0 13 * * 0'   # 週日 13:00 UTC = 台北 21:00(恆定)
+  # 正式排程由 cron-job.org 於每週日台北 21:00 觸發。
+  # 保留 workflow_dispatch 供外部排程與人工補跑使用。
   workflow_dispatch:
     inputs:
       report_week_end:
