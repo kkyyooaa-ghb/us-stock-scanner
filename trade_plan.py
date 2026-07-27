@@ -78,6 +78,7 @@ class TradePlan:
         return {
             "TradePlanStatus": self.status,
             "TradePlanVersion": self.version,
+            "PlanMeasurementVersion": self.measurement_version,
             "PlanSelectedLeg": self.selected_leg.value,
             "OrderType": self.order_type.value,
             "PlanAnchor": self.anchor.value,
@@ -124,7 +125,7 @@ def build_shadow_trade_plan(
     """
     common = {
         "version": Config.TRADE_PLAN_VERSION,
-        "measurement_version": Config.MEASUREMENT_VERSION,
+        "measurement_version": Config.SHADOW_MEASUREMENT_VERSION,
         "selected_leg": decision.selected_leg,
         "time_exit_days": Config.TRADE_PLAN_TIME_EXIT_DAYS,
         "stop_type": "intraday",
@@ -209,6 +210,7 @@ def strategy_config_hash() -> str:
         "signal_engine_version": Config.SIGNAL_ENGINE_VERSION,
         "trade_plan_version": Config.TRADE_PLAN_VERSION,
         "measurement_version": Config.MEASUREMENT_VERSION,
+        "shadow_measurement_version": Config.SHADOW_MEASUREMENT_VERSION,
         "ma_short": Config.MA_SHORT_PERIOD,
         "ma_long": Config.MA_LONG_PERIOD,
         "atr_period": Config.ATR_PERIOD,

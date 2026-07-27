@@ -47,6 +47,7 @@ class Config:
     SIGNAL_ENGINE_VERSION        = "v1.2.0"
     TRADE_PLAN_VERSION           = "v1.3.0-shadow"
     MEASUREMENT_VERSION          = "legacy-v0"
+    SHADOW_MEASUREMENT_VERSION   = "v1.3.0-shadow"
     TRADE_PLAN_TIME_EXIT_DAYS    = 40
 
     # ========== API 金鑰 ==========

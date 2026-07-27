@@ -41,6 +41,7 @@ except Exception:
 GH_API = "https://api.github.com"
 REPORT_ROOT = Path(__file__).resolve().parent / "reports"
 CALIBRATION_MIN_R = 15
+LEGACY_MEASUREMENT_VERSION = "legacy-v0"
 V12_STATUS_PREFIXES = ("📐", "📉", "🌤️")
 LEGACY_STATUS_PREFIXES = ("🔥",)
 
@@ -326,7 +327,11 @@ def summarize_calibration_rows(rows: list[dict]) -> dict:
     n_total = len(rows)
     rs = [x for x in rows if x.get("r") is not None]
     if not rs:
-        return {"n_total": n_total, "n_r": 0}
+        return {
+            "measurement_version": LEGACY_MEASUREMENT_VERSION,
+            "n_total": n_total,
+            "n_r": 0,
+        }
 
     n_r = len(rs)
     r_vals = [x["r"] for x in rs]
@@ -351,6 +356,7 @@ def summarize_calibration_rows(rows: list[dict]) -> dict:
     rest = [x["r"] for x in rs if not _is_extreme_gap(x)]
 
     return {
+        "measurement_version": LEGACY_MEASUREMENT_VERSION,
         "n_total":    n_total,
         "n_r":        n_r,
         "r_mean":     sum(r_vals) / n_r,
@@ -499,7 +505,10 @@ def build_message(agg: dict, notion: dict, calib: dict,
     calib = calib or {}
     if calib.get("ok") and calib.get("n_r", 0) > 0:
         lines.append("━━━━━━━━━━━━━━━━━━")
-        lines.append("<b>📐 校準報告</b>(R模擬:D+5收盤出場/觸停損-1R)")
+        lines.append(
+            "<b>📐 校準報告</b>"
+            "(legacy-v0:R模擬 D+5收盤出場/觸停損-1R)"
+        )
         lines.append(f"  全期已定案 <b>{calib['n_r']}</b>/{calib['n_total']} 筆")
         engine_stats = calib.get("engine_stats", {})
         v12 = engine_stats.get("v1_2", {})

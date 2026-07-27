@@ -2,6 +2,9 @@
 track_performance.py — 績效回填(P1,美股版)V1.0.0
 血統:對齊台股 V13.9.3 Stage 2/3「回填欄由獨立腳本寫」設計;美股版新寫。
 
+量尺版本:legacy-v0。V1.3 shadow 使用 execution_measurement.py，
+兩者輸出不得混算。
+
 目的:把 Notion「美股掃描」DB 既有精選樣本的績效欄位回填,讓週報從
      「觀察期版」升級為「完整校準報告」(R期望值/勝率/n進度),並為
      V1.2.0 計分核心重寫提供舊引擎 baseline(D8:數據先、規則後)。
@@ -36,6 +39,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import requests
 
+from config import Config
 from sources import get_series, ET_TZ
 
 try:
@@ -167,7 +171,11 @@ def compute_backfill(scan_date: str, close: pd.Series, low: pd.Series,
     if base <= 0:
         return {"ok": False, "err": "掃描日收盤價異常(≤0)"}
 
-    out = {"ok": True, "base_close": round(base, 2)}
+    out = {
+        "ok": True,
+        "measurement_version": Config.MEASUREMENT_VERSION,
+        "base_close": round(base, 2),
+    }
 
     def _ret(n: int):
         j = i0 + n
@@ -262,7 +270,7 @@ def update_page(page_id: str, props: dict) -> bool:
 # 5. 主流程
 # ==========================================================================
 def main() -> int:
-    print(f"📐 track_performance 回填 V1.0.0  "
+    print(f"📐 track_performance 回填 V1.0.0/{Config.MEASUREMENT_VERSION}  "
           f"{datetime.now(ET_TZ).strftime('%Y-%m-%d %H:%M')} ET")
 
     if not NOTION_TOKEN or not NOTION_DB_ID:

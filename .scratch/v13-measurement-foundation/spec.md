@@ -52,7 +52,30 @@ Status: claimed
 - `PreGapPct` 必須回寫全池 DataFrame 後再封存。
 - 舊 `SetupType` 保留，另加 `DiagnosticSetupTypeV1` 明示其診斷性質。
 
-## 後續量尺規則
+## V1.3.0-shadow 成交量尺
+
+- 輸入必須是 `auto_adjust=False` 的 as-traded OHLC，並同時下載
+  `Dividends` 與 `Stock Splits`。
+- Entry window 從掃描日 D+0 開始，以完整交易日 bar 計算：
+  - `buy_limit_zone`：開盤低於 limit 時以開盤成交；否則 low 觸及
+    limit 時以 limit 成交。
+  - `buy_stop_reclaim`：開盤高於 trigger 時以開盤成交；否則 high
+    觸及 trigger 時以 trigger 成交。
+- buy-limit 往下穿過 entry 再到 stop 的順序可確定；buy-stop 同一日
+  同時觸 trigger 與 stop 則無法排序，保存 `r_lower`／`r_upper`。
+- 未成交計畫在有效窗結束後標記 `unfilled`，不得產生 R。
+- 成交後若後續開盤直接低於 stop，以該日 open 作為 gap-through 出場，
+  因此 R 可以小於 -1。
+- 拆股以累積持股倍數把後續 raw OHLC 正規化回掃描日基準；現金股息換算為
+  每一原始股的持有期現金流後納入總損益。
+- D+20/40/60 是從掃描日收盤起算、包含拆股與股息的總報酬；MFE/MAE
+  則以實際成交風險單位表示。
+- 初始停損或成交後 D+40 收盤完成交易；一般未完成樣本只輸出 mark R。
+  若 entry bar 本身雙觸，先保存悲觀下界 -1，樂觀上界待後續路徑完成。
+- 每週由永久 `reports/daily/*.csv` 重算並覆寫
+  `reports/shadow_performance.csv`，不寫入 Notion legacy 欄位。
+
+## 量尺分代
 
 - 未成交 episode 不計 R。
 - 日線無法確定 entry/stop 先後時，保存 `r_lower`、`r_upper`。

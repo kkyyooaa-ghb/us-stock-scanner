@@ -9,11 +9,14 @@
 - `weekly/YYYY-MM-DD_YYYY-MM-DD.md`:歷史週報。
 - `weekly/YYYY-MM-DD_YYYY-MM-DD.json`:歷史統計快照。
 - `daily/YYYY-MM-DD.csv`:每日完整掃描結果，供後續 P9 回測與週報重算。
+- `shadow_performance.csv`:V1.3 TradePlan 的獨立成交、R 區間、
+  D+20/40/60、MFE/MAE 與企業行動量尺；不與 Notion legacy R 混算。
 
 ## 產生流程
 
 `.github/workflows/weekly_report.yml` 每週先執行績效回填，再由
-`weekly_report.py` 讀取當週 GitHub Actions artifacts 與 Notion 校準欄位。
+`weekly_report.py` 讀取當週 GitHub Actions artifacts 與 Notion 校準欄位，
+再由 `track_shadow_performance.py` 對永久 daily snapshots 重算 V1.3 量尺。
 同一份統計資料會依序產生 Markdown、JSON 與 Telegram HTML，最後由 workflow
 自動提交 `reports/`。
 

@@ -677,7 +677,8 @@ if __name__ == "__main__":
                     "StopLoss,ATR,ATR_Pct,DistDirection,DistATRMult,YoY,PreGapPct,"
                     "RSI,VolDry,NearMA60,Oversold,RsiTurnUp,HoldMA,SetupType,"
                     "SignalEngineVersion,MeasurementVersion,CandidateLeg,SelectedLeg,"
-                    "LegScoreRaw,VetoReason,TradePlanStatus,TradePlanVersion,OrderType,"
+                    "LegScoreRaw,VetoReason,TradePlanStatus,TradePlanVersion,"
+                    "PlanMeasurementVersion,OrderType,"
                     "PlanAnchor,TriggerPrice,PlanEntryLow,PlanEntryHigh,PlanStopLoss\n")
             f.write(f"ERROR,0,0,0,0,0,0,-,{type(e).__name__}: {e},-99,-99,0,0,-,0,0,0,0,0,,0,,,"
                     "-1,0,0,0,0,0,none\n")

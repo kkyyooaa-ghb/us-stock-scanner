@@ -74,6 +74,7 @@ class CalibrationEngineTests(unittest.TestCase):
 
         self.assertEqual(3, stats["n_total"])
         self.assertEqual(2, stats["n_r"])
+        self.assertEqual("legacy-v0", stats["measurement_version"])
         self.assertAlmostEqual(-0.25, stats["r_mean"])
         self.assertAlmostEqual(0.5, stats["win_rate"])
         self.assertAlmostEqual(0.5, stats["stop_rate"])

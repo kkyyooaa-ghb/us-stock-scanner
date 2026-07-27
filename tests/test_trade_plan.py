@@ -204,6 +204,35 @@ class TradePlanTests(unittest.TestCase):
         self.assertEqual(strategy_config_hash(), strategy_config_hash())
         self.assertRegex(universe_version(), r"^ndx-99-[0-9a-f]{12}$")
 
+    def test_shadow_plan_carries_separate_measurement_version(self):
+        decision = determine_status_details(
+            "consolidate",
+            EMPTY_BROKER,
+            0.5,
+            False,
+            dist_tag="🎯 甜點價",
+            price=100,
+            prev_close=99,
+            day_low=98,
+            ma20=101,
+            ma60=100,
+            yoy=0.2,
+        )
+        plan = build_shadow_trade_plan(
+            decision,
+            price=100,
+            previous_high=102,
+            day_low=98,
+            ma20=101,
+            ma60=100,
+            atr=3,
+        )
+
+        self.assertEqual(
+            "v1.3.0-shadow",
+            plan.to_snapshot_fields()["PlanMeasurementVersion"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
