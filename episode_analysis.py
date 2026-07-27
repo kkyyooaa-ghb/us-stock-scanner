@@ -22,6 +22,24 @@ class EpisodeAnalysis:
     markdown: str
 
 
+EPISODE_COLUMNS = (
+    "EpisodeId",
+    "EpisodeStartDate",
+    "EpisodeEndDate",
+    "EpisodeStatus",
+    "EpisodeSignalCount",
+    "EpisodeDuplicateSignals",
+    "EpisodeLastSignalDate",
+    "EpisodeObservedLegs",
+    "EpisodeObservedOrderTypes",
+    "EpisodeIsActive",
+)
+
+
+def _empty_episode_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=EPISODE_COLUMNS)
+
+
 def _text(row: pd.Series, *keys: str, default: str = "") -> str:
     for key in keys:
         value = row.get(key)
@@ -98,7 +116,7 @@ def _build_episodes(performance: pd.DataFrame) -> pd.DataFrame:
         & frame["Ticker"].astype(str).str.strip().ne("")
     ].copy()
     if frame.empty:
-        return pd.DataFrame()
+        return _empty_episode_frame()
 
     frame["_TickerKey"] = frame["Ticker"].astype(str).str.strip().str.upper()
     frame = frame.sort_values(
@@ -144,21 +162,9 @@ def _build_episodes(performance: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame(episodes)
     if out.empty:
-        return out
-    episode_columns = [
-        "EpisodeId",
-        "EpisodeStartDate",
-        "EpisodeEndDate",
-        "EpisodeStatus",
-        "EpisodeSignalCount",
-        "EpisodeDuplicateSignals",
-        "EpisodeLastSignalDate",
-        "EpisodeObservedLegs",
-        "EpisodeObservedOrderTypes",
-        "EpisodeIsActive",
-    ]
-    remaining = [column for column in out.columns if column not in episode_columns]
-    return out[episode_columns + remaining].sort_values(
+        return _empty_episode_frame()
+    remaining = [column for column in out.columns if column not in EPISODE_COLUMNS]
+    return out[list(EPISODE_COLUMNS) + remaining].sort_values(
         ["EpisodeStartDate", "Ticker"],
         kind="stable",
     ).reset_index(drop=True)
@@ -286,6 +292,27 @@ def _segments(
     return output
 
 
+def _current_measurement_rows(
+    performance: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, int]:
+    """Fail closed to the exact plan/measurement generation under review."""
+    if performance is None or performance.empty:
+        return pd.DataFrame(), 0
+
+    required_versions = {
+        "TradePlanVersion": Config.TRADE_PLAN_VERSION,
+        "PlanMeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
+        "V13MeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
+    }
+    if not set(required_versions).issubset(performance.columns):
+        return performance.iloc[0:0].copy(), len(performance)
+
+    current = pd.Series(True, index=performance.index)
+    for column, expected in required_versions.items():
+        current &= performance[column].astype(str).eq(expected)
+    return performance.loc[current].copy(), int((~current).sum())
+
+
 def _fmt_pct(value: float | None) -> str:
     return "-" if value is None else f"{value:.1%}"
 
@@ -300,6 +327,8 @@ def _markdown(summary: dict[str, Any]) -> str:
     lines = [
         "# V1.3 Shadow Episode Report",
         "",
+        f"- 輸入訊號：{summary['input_signals']}",
+        f"- 排除非本版量尺：{summary['excluded_version_signals']}",
         f"- 原始日訊號：{summary['raw_signals']}",
         f"- 獨立 episodes：{summary['episodes']}",
         f"- 去除重複訊號：{summary['duplicate_signals']} "
@@ -345,7 +374,8 @@ def _markdown(summary: dict[str, Any]) -> str:
 
     lines.extend([
         "",
-        "> 本報告只使用 v1.3.0-shadow episode；legacy-v0 不混入。"
+        f"> 本報告只使用 {summary['measurement_version']} episode；"
+        "legacy-v0 不混入。"
         "閘門未通過前不得依此調整權重。",
         "",
     ])
@@ -360,11 +390,15 @@ def build_episode_analysis(
     segment_min_completed: int = Config.EPISODE_SEGMENT_MIN_COMPLETED,
 ) -> EpisodeAnalysis:
     """Collapse daily signals into lifecycle episodes and compute maturity KPIs."""
-    raw_signals = 0 if performance is None else len(performance)
-    if performance is None or performance.empty:
-        episodes = pd.DataFrame()
+    input_signals = 0 if performance is None else len(performance)
+    current_performance, excluded_version_signals = _current_measurement_rows(
+        performance
+    )
+    raw_signals = len(current_performance)
+    if current_performance.empty:
+        episodes = _empty_episode_frame()
     else:
-        episodes = _build_episodes(performance)
+        episodes = _build_episodes(current_performance)
 
     overall = _metrics(episodes)
     completed_r = overall["completed_r"]
@@ -382,8 +416,10 @@ def build_episode_analysis(
         else "SelectedLeg"
     )
     summary = {
-        "schema_version": "v1.3.0",
+        "schema_version": Config.SNAPSHOT_SCHEMA_VERSION,
         "measurement_version": Config.SHADOW_MEASUREMENT_VERSION,
+        "input_signals": input_signals,
+        "excluded_version_signals": excluded_version_signals,
         "raw_signals": raw_signals,
         "episodes": len(episodes),
         "duplicate_signals": raw_signals - len(episodes),

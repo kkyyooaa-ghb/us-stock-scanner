@@ -72,6 +72,7 @@ class TradePlan:
     time_exit_days: int
     stop_type: str
     exit_rule: str
+    earliest_entry_date: str | None
     reason: str = ""
 
     def to_snapshot_fields(self) -> dict[str, Any]:
@@ -91,6 +92,7 @@ class TradePlan:
             "PlanTimeExitDays": self.time_exit_days,
             "PlanStopType": self.stop_type,
             "PlanExitRule": self.exit_rule,
+            "PlanEarliestEntryDate": self.earliest_entry_date,
             "PlanReason": self.reason,
         }
 
@@ -111,11 +113,12 @@ def build_shadow_trade_plan(
     decision: SignalDecision,
     *,
     price: float,
-    previous_high: float,
+    signal_bar_high: float,
     day_low: float,
     ma20: float,
     ma60: float,
     atr: float,
+    earliest_entry_date: str | None,
 ) -> TradePlan:
     """Build a leg-aware V1.3 plan without changing production selection.
 
@@ -130,6 +133,7 @@ def build_shadow_trade_plan(
         "time_exit_days": Config.TRADE_PLAN_TIME_EXIT_DAYS,
         "stop_type": "intraday",
         "exit_rule": "initial_stop_or_d40_close",
+        "earliest_entry_date": earliest_entry_date,
     }
 
     if decision.selected_leg is SignalLeg.NONE:
@@ -137,8 +141,8 @@ def build_shadow_trade_plan(
         return TradePlan(
             status=status,
             order_type=OrderType.NONE,
-            anchor=decision.anchor,
-            anchor_price=decision.anchor_price or None,
+            anchor=PlanAnchor.NONE,
+            anchor_price=None,
             trigger_price=None,
             entry_low=None,
             entry_high=None,
@@ -166,15 +170,15 @@ def build_shadow_trade_plan(
         valid_days = 5
 
     elif decision.selected_leg is SignalLeg.OVERSOLD_BOUNCE:
-        anchor_price = previous_high
-        entry_low = _round_price(previous_high + 0.1 * atr_eff)
+        anchor_price = signal_bar_high
+        entry_low = _round_price(signal_bar_high + 0.1 * atr_eff)
         entry_high = _round_price(entry_low + 0.25 * atr_eff)
         order_type = OrderType.BUY_STOP_RECLAIM
         trigger = entry_low
         stop_reference = min(day_low - 0.1 * atr_eff, price - 1.5 * atr_eff)
         stop = _round_price(stop_reference)
         valid_days = 5
-        reason = "oversold_requires_break_above_previous_high"
+        reason = "oversold_requires_break_above_signal_bar_high"
 
     else:
         anchor_price = ma20 if decision.anchor is PlanAnchor.MA20 else ma60
@@ -190,7 +194,7 @@ def build_shadow_trade_plan(
         stop = _round_price(entry_low * 0.97)
 
     return TradePlan(
-        status="shadow_ready",
+        status="shadow_ready" if earliest_entry_date else "timing_unavailable",
         order_type=order_type,
         anchor=decision.anchor,
         anchor_price=_round_price(anchor_price),
@@ -199,7 +203,11 @@ def build_shadow_trade_plan(
         entry_high=entry_high,
         stop_loss=stop,
         valid_days=valid_days,
-        reason=reason,
+        reason=(
+            reason
+            if earliest_entry_date
+            else f"{reason};entry_calendar_unavailable"
+        ),
         **common,
     )
 
@@ -225,6 +233,10 @@ def strategy_config_hash() -> str:
         "min_priority": Config.MIN_PRIORITY_FOR_GO,
         "top_n": Config.TOP_N_RECOMMENDED,
         "time_exit_days": Config.TRADE_PLAN_TIME_EXIT_DAYS,
+        "premarket_quote_start_hour": Config.PREMARKET_QUOTE_ET_HOUR_START,
+        "daily_bar_finalization_buffer_minutes": (
+            Config.DAILY_BAR_FINALIZATION_BUFFER_MINUTES
+        ),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()[:16]

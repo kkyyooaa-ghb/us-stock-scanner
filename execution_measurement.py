@@ -14,7 +14,7 @@ from typing import Any
 import pandas as pd
 
 from config import Config
-from trade_plan import OrderType, TradePlan
+from trade_plan import OrderType, PlanAnchor, SignalLeg, TradePlan
 
 
 class MeasurementStatus(str, Enum):
@@ -103,7 +103,8 @@ def _round(value: float | None, digits: int = 4) -> float | None:
 
 def _prepare_history(
     history: pd.DataFrame,
-    scan_date: str,
+    entry_date: str,
+    measurement_as_of_date: str | None = None,
 ) -> tuple[pd.DataFrame | None, str]:
     if history is None or history.empty:
         return None, "empty_history"
@@ -130,15 +131,20 @@ def _prepare_history(
         frame.index = frame.index.tz_localize(None)
     frame = frame[~frame.index.duplicated(keep="last")].sort_index()
     frame = frame.dropna(subset=list(required))
+    if measurement_as_of_date:
+        as_of = pd.Timestamp(measurement_as_of_date).date()
+        frame = frame[
+            [timestamp.date() <= as_of for timestamp in frame.index]
+        ]
 
-    target_date = pd.Timestamp(scan_date).date()
+    target_date = pd.Timestamp(entry_date).date()
     positions = [
         position
         for position, timestamp in enumerate(frame.index)
         if timestamp.date() == target_date
     ]
     if not positions:
-        return None, f"scan_date_missing:{scan_date}"
+        return None, f"entry_date_missing:{entry_date}"
     frame = frame.iloc[positions[0]:].copy()
 
     factor = 1.0
@@ -260,28 +266,96 @@ def _excursions(
 
 
 def evaluate_trade_plan(
-    scan_date: str,
+    snapshot_date: str,
     history: pd.DataFrame,
     plan: TradePlan,
+    *,
+    measurement_as_of_date: str | None = None,
 ) -> TradeMeasurement:
     """Evaluate one V1.3 TradePlan using unadjusted as-traded daily bars.
 
     Interface rules:
     - ``history`` must use raw OHLC. Optional ``Dividends`` and
       ``Stock Splits`` columns use yfinance action semantics.
-    - A plan's entry window starts on ``scan_date`` and counts trading bars.
+    - ``snapshot_date`` is provenance only.  The entry window and horizon
+      returns start on the immutable ``plan.earliest_entry_date``.
+    - ``measurement_as_of_date`` bounds observable bars. If omitted, the
+      latest history date is used, falling back to the snapshot date.
     - A buy-limit fills at the open when open <= limit, otherwise at the limit
       when the day's low reaches it.
     - A buy-stop fills at the open when open >= trigger, otherwise at the
       trigger when the day's high reaches it.
     - If an intraday buy-stop bar also reaches the stop, daily bars cannot
       reveal ordering; final outcomes are reported as an R interval.
-    - D+20/40/60 are split- and dividend-aware total returns from scan close.
+    - D+20/40/60 are split- and dividend-aware total returns from the earliest
+      eligible session close.
     """
-    frame, history_error = _prepare_history(history, scan_date)
     common = {
         "measurement_version": Config.SHADOW_MEASUREMENT_VERSION,
     }
+    if plan.version != Config.TRADE_PLAN_VERSION:
+        return TradeMeasurement(
+            status=MeasurementStatus.INVALID_PLAN,
+            reason=f"trade_plan_version_mismatch:{plan.version}",
+            **common,
+        )
+    if plan.measurement_version != Config.SHADOW_MEASUREMENT_VERSION:
+        return TradeMeasurement(
+            status=MeasurementStatus.INVALID_PLAN,
+            reason=f"measurement_version_mismatch:{plan.measurement_version}",
+            **common,
+        )
+
+    entry_date = str(plan.earliest_entry_date or "")
+    try:
+        parsed_entry = pd.Timestamp(entry_date)
+        parsed_snapshot = pd.Timestamp(snapshot_date)
+        if (
+            len(entry_date) != 10
+            or parsed_entry.strftime("%Y-%m-%d") != entry_date
+            or parsed_entry.date() < parsed_snapshot.date()
+        ):
+            raise ValueError
+    except Exception:
+        return TradeMeasurement(
+            status=MeasurementStatus.INVALID_PLAN,
+            reason="missing_or_invalid_earliest_entry_date",
+            **common,
+        )
+
+    try:
+        if measurement_as_of_date is not None:
+            parsed_as_of = pd.Timestamp(measurement_as_of_date)
+            as_of_date = parsed_as_of.strftime("%Y-%m-%d")
+            if (
+                len(str(measurement_as_of_date)) != 10
+                or as_of_date != str(measurement_as_of_date)
+            ):
+                raise ValueError
+        elif history is not None and not history.empty:
+            history_dates = pd.to_datetime(history.index)
+            as_of_date = pd.Timestamp(history_dates.max()).strftime("%Y-%m-%d")
+        else:
+            as_of_date = parsed_snapshot.strftime("%Y-%m-%d")
+    except Exception:
+        return TradeMeasurement(
+            status=MeasurementStatus.INVALID_PLAN,
+            reason="missing_or_invalid_measurement_as_of_date",
+            **common,
+        )
+
+    if parsed_entry.date() > pd.Timestamp(as_of_date).date():
+        return TradeMeasurement(
+            status=MeasurementStatus.AWAITING_FILL,
+            reason="entry_window_not_started",
+            **common,
+        )
+
+    frame, history_error = _prepare_history(
+        history,
+        entry_date,
+        as_of_date,
+    )
     if frame is None:
         return TradeMeasurement(
             status=MeasurementStatus.NO_DATA,
@@ -302,7 +376,9 @@ def evaluate_trade_plan(
 
     if (
         plan.status != "shadow_ready"
+        or plan.selected_leg is SignalLeg.NONE
         or plan.order_type is OrderType.NONE
+        or plan.anchor is PlanAnchor.NONE
         or plan.stop_loss is None
         or plan.stop_loss <= 0
         or plan.valid_days <= 0

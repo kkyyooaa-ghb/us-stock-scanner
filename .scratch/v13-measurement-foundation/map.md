@@ -6,3 +6,4 @@
 | 02 Shadow 快照與 PreGap | task | resolved | 01 |
 | 03 成交／R 區間與企業行動 | task | resolved | 01, 02 |
 | 04 Episode 與完成樣本統計 | task | resolved | 03 |
+| 05 Forward snapshot 盤前硬化 | task | resolved | 04 |

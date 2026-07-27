@@ -18,12 +18,14 @@ from typing import Mapping
 
 import pandas as pd
 
+from config import Config
 from execution_measurement import (
     MeasurementStatus,
     TradeMeasurement,
     evaluate_trade_plan,
 )
-from sources import ET_TZ
+from sources import ET_TZ, resolve_plan_entry_timing
+from snapshot_schema import snapshot_data_rows
 from trade_plan import OrderType, PlanAnchor, SignalLeg, TradePlan
 
 try:
@@ -36,23 +38,43 @@ except ImportError:
 IDENTITY_COLUMNS = (
     "SnapshotAsOfET",
     "DataBarDate",
+    "SnapshotSchemaVersion",
+    "ScanSession",
+    "ScanAfterOpen",
+    "SnapshotTimingSource",
     "Ticker",
     "SignalEngineVersion",
     "TradePlanVersion",
     "PlanMeasurementVersion",
     "ConfigHash",
     "UniverseVersion",
+    "CandidateLeg",
     "SelectedLeg",
+    "LegScoreRaw",
+    "LegAnchor",
+    "LegAnchorPrice",
+    "VetoReason",
     "OrderType",
     "PlanSelectedLeg",
+    "PlanAnchor",
+    "PlanAnchorPrice",
+    "TriggerPrice",
+    "PlanEntryLow",
+    "PlanEntryHigh",
+    "PlanStopLoss",
     "PlanValidDays",
     "PlanTimeExitDays",
+    "PlanStopType",
+    "PlanExitRule",
+    "PlanEarliestEntryDate",
+    "PlanReason",
     "PriorityPreTheme",
     "PriorityPostTheme",
     "ThemeScore",
     "CrossedThresholdDueToTheme",
     "EnteredTop10DueToTheme",
     "PreGapPct",
+    "PreGapStatus",
     "MarketBias",
     "VixLevel",
     "SpyGapPct",
@@ -76,15 +98,26 @@ def _required_int(row: pd.Series, key: str) -> int:
     return int(value)
 
 
+def _optional_text(row: pd.Series, key: str) -> str | None:
+    value = row.get(key)
+    if value is None or pd.isna(value) or str(value).strip() == "":
+        return None
+    return str(value).strip()
+
+
 def _plan_from_snapshot(row: pd.Series) -> TradePlan:
-    selected_leg = str(row.get("PlanSelectedLeg") or row.get("SelectedLeg") or "none")
+    selected_leg = (
+        _optional_text(row, "PlanSelectedLeg")
+        or _optional_text(row, "SelectedLeg")
+        or "none"
+    )
     return TradePlan(
-        status=str(row.get("TradePlanStatus") or ""),
-        version=str(row.get("TradePlanVersion") or ""),
-        measurement_version=str(row.get("PlanMeasurementVersion") or ""),
+        status=_optional_text(row, "TradePlanStatus") or "",
+        version=_optional_text(row, "TradePlanVersion") or "",
+        measurement_version=_optional_text(row, "PlanMeasurementVersion") or "",
         selected_leg=SignalLeg(selected_leg),
-        order_type=OrderType(str(row.get("OrderType") or "none")),
-        anchor=PlanAnchor(str(row.get("PlanAnchor") or "none")),
+        order_type=OrderType(_optional_text(row, "OrderType") or "none"),
+        anchor=PlanAnchor(_optional_text(row, "PlanAnchor") or "none"),
         anchor_price=_optional_number(row, "PlanAnchorPrice"),
         trigger_price=_optional_number(row, "TriggerPrice"),
         entry_low=_optional_number(row, "PlanEntryLow"),
@@ -92,9 +125,10 @@ def _plan_from_snapshot(row: pd.Series) -> TradePlan:
         stop_loss=_optional_number(row, "PlanStopLoss"),
         valid_days=_required_int(row, "PlanValidDays"),
         time_exit_days=_required_int(row, "PlanTimeExitDays"),
-        stop_type=str(row.get("PlanStopType") or ""),
-        exit_rule=str(row.get("PlanExitRule") or ""),
-        reason=str(row.get("PlanReason") or ""),
+        stop_type=_optional_text(row, "PlanStopType") or "",
+        exit_rule=_optional_text(row, "PlanExitRule") or "",
+        earliest_entry_date=_optional_text(row, "PlanEarliestEntryDate"),
+        reason=_optional_text(row, "PlanReason") or "",
     )
 
 
@@ -108,6 +142,8 @@ def _scan_date(row: pd.Series) -> str:
 def evaluate_snapshot(
     snapshot: pd.DataFrame,
     histories: Mapping[str, pd.DataFrame],
+    *,
+    measurement_as_of_date: str | None = None,
 ) -> pd.DataFrame:
     """Evaluate all shadow-ready plans in one or more immutable snapshots."""
     if snapshot is None or snapshot.empty:
@@ -142,12 +178,14 @@ def evaluate_snapshot(
                 _scan_date(row),
                 histories.get(ticker, pd.DataFrame()),
                 plan,
+                measurement_as_of_date=measurement_as_of_date,
             )
         except Exception as exc:
             result = TradeMeasurement(
                 status=MeasurementStatus.INVALID_PLAN,
-                measurement_version=str(
-                    row.get("PlanMeasurementVersion") or "v1.3.0-shadow"
+                measurement_version=(
+                    _optional_text(row, "PlanMeasurementVersion")
+                    or Config.SHADOW_MEASUREMENT_VERSION
                 ),
                 reason=f"snapshot_parse_error:{type(exc).__name__}:{exc}",
             )
@@ -180,8 +218,15 @@ def _history_for_ticker(data: pd.DataFrame, ticker: str) -> pd.DataFrame:
 def download_as_traded_histories(
     tickers: list[str],
     earliest_scan_date: str,
+    *,
+    observation_time_et: datetime | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Download raw OHLC plus actions; never use auto-adjusted bars here."""
+    """Download raw OHLC/actions with a cutoff frozen before network I/O."""
+    download_started_et = observation_time_et or datetime.now(ET_TZ)
+    timing = resolve_plan_entry_timing(download_started_et)
+    current_daily_bar_complete = bool(
+        timing.get("current_daily_bar_complete", False)
+    )
     data = yf.download(
         sorted(set(tickers)),
         start=earliest_scan_date,
@@ -196,13 +241,13 @@ def download_as_traded_histories(
         return {}
 
     histories = {}
-    now_et = datetime.now(ET_TZ)
     for ticker in sorted(set(tickers)):
         frame = _history_for_ticker(data, ticker)
         if (
             not frame.empty
-            and now_et.hour < 17
-            and frame.index[-1].strftime("%Y-%m-%d") == now_et.strftime("%Y-%m-%d")
+            and not current_daily_bar_complete
+            and frame.index[-1].strftime("%Y-%m-%d")
+            == download_started_et.strftime("%Y-%m-%d")
         ):
             frame = frame.iloc[:-1]
         histories[ticker] = frame
@@ -210,7 +255,10 @@ def download_as_traded_histories(
 
 
 def _load_snapshots(paths: list[str]) -> pd.DataFrame:
-    frames = [pd.read_csv(path) for path in paths]
+    frames = [
+        snapshot_data_rows(pd.read_csv(path))
+        for path in paths
+    ]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -252,11 +300,40 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     tickers = sorted(set(plans["Ticker"].astype(str).str.upper()))
-    earliest = min(plans["SnapshotAsOfET"].astype(str).str[:10])
-    print(f"📐 V1.3 shadow 量尺:{len(plans)} 筆計畫 / {len(tickers)} 檔股票")
-    print(f"  📡 as-traded OHLC + actions，自 {earliest} 起")
-    histories = download_as_traded_histories(tickers, earliest)
-    result = evaluate_snapshot(snapshot, histories)
+    entry_dates = (
+        plans.get(
+            "PlanEarliestEntryDate",
+            pd.Series(index=plans.index, dtype=str),
+        )
+        .dropna()
+        .astype(str)
+    )
+    parsed_entry_dates = pd.to_datetime(entry_dates, errors="coerce")
+    entry_dates = entry_dates[
+        parsed_entry_dates.notna()
+        & parsed_entry_dates.dt.strftime("%Y-%m-%d").eq(entry_dates)
+    ]
+    measurement_started_et = datetime.now(ET_TZ)
+    measurement_timing = resolve_plan_entry_timing(measurement_started_et)
+    if entry_dates.empty:
+        print("⚠️  shadow-ready plans 缺 PlanEarliestEntryDate，將標記 invalid_plan")
+        histories = {}
+    else:
+        earliest = min(entry_dates)
+        print(f"📐 V1.3 shadow 量尺:{len(plans)} 筆計畫 / {len(tickers)} 檔股票")
+        print(f"  📡 as-traded OHLC + actions，自 {earliest} 起")
+        histories = download_as_traded_histories(
+            tickers,
+            earliest,
+            observation_time_et=measurement_started_et,
+        )
+    result = evaluate_snapshot(
+        snapshot,
+        histories,
+        measurement_as_of_date=measurement_timing.get(
+            "last_complete_session_date"
+        ),
+    )
     result.to_csv(args.output, index=False, encoding="utf-8-sig")
 
     counts = result.get("V13MeasurementStatus", pd.Series(dtype=str)).value_counts()

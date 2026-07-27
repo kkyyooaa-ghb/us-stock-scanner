@@ -45,9 +45,10 @@ import os
 class Config:
     # ========== 策略／量尺版本(V1.3 shadow) ==========
     SIGNAL_ENGINE_VERSION        = "v1.2.0"
-    TRADE_PLAN_VERSION           = "v1.3.0-shadow"
+    TRADE_PLAN_VERSION           = "v1.3.1-shadow"
     MEASUREMENT_VERSION          = "legacy-v0"
-    SHADOW_MEASUREMENT_VERSION   = "v1.3.0-shadow"
+    SHADOW_MEASUREMENT_VERSION   = "v1.3.1-shadow"
+    SNAPSHOT_SCHEMA_VERSION      = "v1.3.1"
     TRADE_PLAN_TIME_EXIT_DAYS    = 40
     EPISODE_TUNING_MIN_COMPLETED = 60
     EPISODE_TUNING_TARGET        = 100
@@ -268,6 +269,8 @@ class Config:
 
     # ========== 執行時段護欄(原 V13.8.7;改 ET 視窗) ==========
     # 正常排程窗:美東 08:30–09:30 ET(盤前掃描);窗外執行加註警示
+    PREMARKET_QUOTE_ET_HOUR_START = 4
+    DAILY_BAR_FINALIZATION_BUFFER_MINUTES = 15
     SCAN_NORMAL_ET_HOUR_START = 8
     SCAN_NORMAL_ET_MIN_START  = 30
     SCAN_NORMAL_ET_HOUR_END   = 9

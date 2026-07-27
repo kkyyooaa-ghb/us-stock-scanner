@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
+from snapshot_schema import snapshot_data_rows, write_snapshot
 
 try:
     from zoneinfo import ZoneInfo
@@ -88,20 +89,14 @@ def fetch_week_artifacts(week_start: str, week_end: str) -> list[dict]:
             "et_date":    et_date,
         })
 
-    # 同一美東日只取最後一次(手動補跑去重)
-    by_date: dict[str, dict] = {}
-    for a in out:
-        cur = by_date.get(a["et_date"])
-        if cur is None or a["created_at"] > cur["created_at"]:
-            by_date[a["et_date"]] = a
-    deduped = sorted(by_date.values(), key=lambda x: x["et_date"])
-    print(f"📦 {week_start}~{week_end} artifacts:{len(out)} 個"
-          f" → 去重後 {len(deduped)} 個交易日")
-    return deduped
+    ordered = sorted(out, key=lambda item: (item["et_date"], item["created_at"]))
+    print(f"📦 {week_start}~{week_end} artifacts:{len(ordered)} 個"
+          "（下載後依內容選每日最佳快照）")
+    return ordered
 
 
 def download_csv(artifact_id: int):
-    """下載單一 artifact zip → 解出 scan_result.csv → pandas DataFrame(或 None)"""
+    """下載單一 artifact zip → 解出完整 scan_result.csv（含 control row）。"""
     import pandas as pd
     repo  = os.environ["GITHUB_REPOSITORY"]
     token = os.environ["GITHUB_TOKEN"]
@@ -116,15 +111,49 @@ def download_csv(artifact_id: int):
                 return None
             with zf.open(name) as f:
                 df = pd.read_csv(f, encoding="utf-8-sig")
-        # 排除崩潰保底列
-        if "Ticker" in df.columns:
-            df = df[df["Ticker"].astype(str) != "ERROR"]
-        if df.empty or "Priority" not in df.columns:
-            return None
         return df
     except Exception as e:
         print(f"⚠️  artifact {artifact_id} 下載/解析失敗:{e}")
         return None
+
+
+def select_daily_artifacts(candidates: list[dict]) -> list[dict]:
+    """Prefer successful premarket data over later rerun failures per ET date."""
+    selected: dict[str, tuple[tuple[int, datetime], dict]] = {}
+    for candidate in candidates:
+        frame = candidate.get("frame")
+        if frame is None:
+            continue
+        data = snapshot_data_rows(frame)
+        if not data.empty and "Priority" in data.columns:
+            sessions = (
+                set(data["ScanSession"].astype(str))
+                if "ScanSession" in data.columns
+                else set()
+            )
+            if "premarket" in sessions:
+                quality = 4
+            elif "preopen" in sessions:
+                quality = 3
+            else:
+                quality = 2
+        elif (
+            "SnapshotRecordType" in frame.columns
+            and frame["SnapshotRecordType"].astype(str).eq("control").any()
+        ):
+            quality = 1
+        else:
+            quality = 0
+
+        rank = (quality, candidate["created_at"])
+        current = selected.get(candidate["et_date"])
+        if current is None or rank > current[0]:
+            selected[candidate["et_date"]] = (rank, candidate)
+    return [
+        selected[date][1]
+        for date in sorted(selected)
+        if selected[date][0][0] > 0
+    ]
 
 
 # ==========================================================================
@@ -135,7 +164,11 @@ def archive_daily_csv(df, et_date: str, report_root: Path = REPORT_ROOT) -> str:
     daily_dir = report_root / "daily"
     daily_dir.mkdir(parents=True, exist_ok=True)
     path = daily_dir / f"{et_date}.csv"
-    df.to_csv(path, index=False, encoding="utf-8-sig")
+    if "SnapshotSchemaVersion" in df.columns:
+        write_snapshot(df, path)
+    else:
+        # 歷史 30 欄 artifact 原樣保存，不杜撰 V1.3 facts。
+        df.to_csv(path, index=False, encoding="utf-8-sig")
     return path.relative_to(report_root.parent).as_posix()
 
 
@@ -737,16 +770,25 @@ def main():
     print(f"📋 週報區間(ET):{week_start} ~ {week_end}")
 
     arts = fetch_week_artifacts(week_start, week_end)
+    downloaded = []
+    for artifact in arts:
+        frame = download_csv(artifact["id"])
+        if frame is not None:
+            downloaded.append({**artifact, "frame": frame})
+    selected_artifacts = select_daily_artifacts(downloaded)
     days = []
     archived_csv_files = []
-    for a in arts:
-        df = download_csv(a["id"])
-        if df is not None:
-            days.append((a["et_date"], df))
-            archived_csv_files.append(archive_daily_csv(df, a["et_date"]))
-            print(f"  ✅ {a['et_date']}:{len(df)} 檔")
+    for artifact in selected_artifacts:
+        full_snapshot = artifact["frame"]
+        archived_csv_files.append(
+            archive_daily_csv(full_snapshot, artifact["et_date"])
+        )
+        data = snapshot_data_rows(full_snapshot)
+        if not data.empty and "Priority" in data.columns:
+            days.append((artifact["et_date"], data))
+            print(f"  ✅ {artifact['et_date']}:{len(data)} 檔")
         else:
-            print(f"  ⚠️ {a['et_date']}:CSV 無效,略過")
+            print(f"  ⚠️ {artifact['et_date']}:control snapshot 已封存，不納入彙總")
 
     agg = aggregate(days) if days else {"daily": [], "top5": [],
                                         "eq6_regulars": [], "warn_regulars": [],

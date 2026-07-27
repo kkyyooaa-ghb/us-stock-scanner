@@ -7,6 +7,7 @@ import types
 sys.modules.setdefault("requests", types.SimpleNamespace())
 
 from analyzers import determine_status, determine_status_details
+from config import Config
 from trade_plan import (
     OrderType,
     PlanAnchor,
@@ -98,11 +99,12 @@ class TradePlanTests(unittest.TestCase):
         plan = build_shadow_trade_plan(
             decision,
             price=98,
-            previous_high=99,
+            signal_bar_high=99,
             day_low=97,
             ma20=101,
             ma60=100,
             atr=3,
+            earliest_entry_date="2026-01-05",
         )
         self.assertEqual("shadow_ready", plan.status)
         self.assertEqual(OrderType.BUY_STOP_RECLAIM, plan.order_type)
@@ -129,15 +131,16 @@ class TradePlanTests(unittest.TestCase):
         plan = build_shadow_trade_plan(
             decision,
             price=80,
-            previous_high=82,
+            signal_bar_high=82,
             day_low=77,
             ma20=90,
             ma60=100,
             atr=4,
+            earliest_entry_date="2026-01-05",
         )
         self.assertEqual(OrderType.BUY_STOP_RECLAIM, plan.order_type)
-        self.assertGreater(plan.entry_low, 0)
-        self.assertGreaterEqual(plan.trigger_price, 82)
+        self.assertEqual(82, plan.anchor_price)
+        self.assertEqual(82.4, plan.trigger_price)
         self.assertLess(plan.stop_loss, plan.entry_low)
 
     def test_healthy_ma20_pullback_plan_uses_ma20_not_ma60(self):
@@ -161,11 +164,12 @@ class TradePlanTests(unittest.TestCase):
         plan = build_shadow_trade_plan(
             decision,
             price=102,
-            previous_high=103,
+            signal_bar_high=103,
             day_low=100,
             ma20=100,
             ma60=90,
             atr=4,
+            earliest_entry_date="2026-01-05",
         )
         self.assertEqual(OrderType.BUY_LIMIT_ZONE, plan.order_type)
         self.assertEqual(100, plan.anchor_price)
@@ -189,14 +193,17 @@ class TradePlanTests(unittest.TestCase):
         plan = build_shadow_trade_plan(
             decision,
             price=100,
-            previous_high=102,
+            signal_bar_high=102,
             day_low=98,
             ma20=101,
             ma60=100,
             atr=3,
+            earliest_entry_date="2026-01-05",
         )
         self.assertEqual("vetoed", plan.status)
         self.assertEqual(OrderType.NONE, plan.order_type)
+        self.assertEqual(PlanAnchor.NONE, plan.anchor)
+        self.assertIsNone(plan.anchor_price)
         self.assertIsNone(plan.trigger_price)
         self.assertIsNone(plan.stop_loss)
 
@@ -221,15 +228,16 @@ class TradePlanTests(unittest.TestCase):
         plan = build_shadow_trade_plan(
             decision,
             price=100,
-            previous_high=102,
+            signal_bar_high=102,
             day_low=98,
             ma20=101,
             ma60=100,
             atr=3,
+            earliest_entry_date="2026-01-05",
         )
 
         self.assertEqual(
-            "v1.3.0-shadow",
+            Config.SHADOW_MEASUREMENT_VERSION,
             plan.to_snapshot_fields()["PlanMeasurementVersion"],
         )
 

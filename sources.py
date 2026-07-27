@@ -87,8 +87,137 @@ def is_in_scan_window() -> bool:
     return start <= now <= end
 
 
+def is_premarket_quote_window(now_et: datetime = None) -> bool:
+    """Return whether US extended-hours premarket quotes are observable."""
+    now = now_et or datetime.now(ET_TZ)
+    if now.tzinfo is None:
+        raise ValueError("now_et must be timezone-aware")
+    now = now.astimezone(ET_TZ)
+    start = now.replace(
+        hour=Config.PREMARKET_QUOTE_ET_HOUR_START,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    end = now.replace(
+        hour=Config.SCAN_NORMAL_ET_HOUR_END,
+        minute=Config.SCAN_NORMAL_ET_MIN_END,
+        second=0,
+        microsecond=0,
+    )
+    return start <= now < end
+
+
 # 行事曆物件快取(避免每次呼叫重建)
 _NYSE_CAL = None
+
+
+def _get_nyse_calendar():
+    """Return the cached XNYS calendar used by all session-date decisions."""
+    global _NYSE_CAL
+    if _NYSE_CAL is None:
+        import exchange_calendars as xcals
+        _NYSE_CAL = xcals.get_calendar("XNYS")
+    return _NYSE_CAL
+
+
+def resolve_plan_entry_timing(now_et: datetime = None) -> dict:
+    """Resolve the first full daily bar that may execute a new TradePlan.
+
+    Premarket plans may trade in the current session.  Plans created at or
+    after the opening bell wait for the next XNYS session because a daily bar
+    cannot order events that happened before the snapshot existed.  Calendar
+    failures are explicit and never guessed.
+    """
+    now = now_et or datetime.now(ET_TZ)
+    if now.tzinfo is None:
+        raise ValueError("now_et must be timezone-aware")
+    now = now.astimezone(ET_TZ)
+    date_et = now.strftime("%Y-%m-%d")
+
+    try:
+        cal = _get_nyse_calendar()
+        if cal.is_session(date_et):
+            session_open = pd.Timestamp(cal.session_open(date_et))
+            if session_open.tzinfo is None:
+                session_open = session_open.tz_localize("UTC")
+            open_et = session_open.tz_convert("America/New_York").to_pydatetime()
+            session_close = pd.Timestamp(cal.session_close(date_et))
+            if session_close.tzinfo is None:
+                session_close = session_close.tz_localize("UTC")
+            close_et = session_close.tz_convert(
+                "America/New_York"
+            ).to_pydatetime()
+            current_session_closed = now >= close_et
+            current_daily_bar_complete = now >= (
+                close_et
+                + timedelta(
+                    minutes=Config.DAILY_BAR_FINALIZATION_BUFFER_MINUTES
+                )
+            )
+            last_complete_session_date = (
+                date_et
+                if current_daily_bar_complete
+                else pd.Timestamp(
+                    cal.previous_session(date_et)
+                ).strftime("%Y-%m-%d")
+            )
+            if now < open_et:
+                earliest = date_et
+                scan_session = (
+                    "premarket"
+                    if now.hour >= Config.PREMARKET_QUOTE_ET_HOUR_START
+                    else "preopen"
+                )
+                scan_after_open = False
+                reason = (
+                    "premarket_same_xnys_session"
+                    if scan_session == "premarket"
+                    else "before_premarket_same_xnys_session"
+                )
+            else:
+                earliest = pd.Timestamp(
+                    cal.next_session(date_et)
+                ).strftime("%Y-%m-%d")
+                scan_session = "after_open"
+                scan_after_open = True
+                reason = "at_or_after_xnys_open_next_session"
+        else:
+            earliest = pd.Timestamp(
+                cal.date_to_session(pd.Timestamp(date_et), direction="next")
+            ).strftime("%Y-%m-%d")
+            last_complete_session_date = pd.Timestamp(
+                cal.date_to_session(pd.Timestamp(date_et), direction="previous")
+            ).strftime("%Y-%m-%d")
+            scan_session = "non_session"
+            scan_after_open = False
+            current_session_closed = False
+            current_daily_bar_complete = False
+            reason = "non_session_next_xnys_session"
+
+        return {
+            "ok": True,
+            "earliest_entry_date": earliest,
+            "scan_session": scan_session,
+            "scan_after_open": scan_after_open,
+            "current_session_closed": current_session_closed,
+            "current_daily_bar_complete": current_daily_bar_complete,
+            "last_complete_session_date": last_complete_session_date,
+            "source": "xnys",
+            "reason": reason,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "earliest_entry_date": None,
+            "scan_session": "calendar_error",
+            "scan_after_open": False,
+            "current_session_closed": False,
+            "current_daily_bar_complete": False,
+            "last_complete_session_date": None,
+            "source": "unavailable",
+            "reason": f"{type(exc).__name__}:{exc}",
+        }
 
 
 def is_trading_day(date_et: str = None) -> dict:
@@ -113,15 +242,11 @@ def is_trading_day(date_et: str = None) -> dict:
        且 is_session=True(不擋),並印警告 — 寧可多跑一次,不可因套件問題漏掉
        真正的交易日。但正常情況(套件可用)就是確定性護欄。
     """
-    global _NYSE_CAL
     if date_et is None:
         date_et = datetime.now(ET_TZ).strftime('%Y-%m-%d')
 
     try:
-        if _NYSE_CAL is None:
-            import exchange_calendars as xcals
-            _NYSE_CAL = xcals.get_calendar("XNYS")
-        cal = _NYSE_CAL
+        cal = _get_nyse_calendar()
 
         is_sess = bool(cal.is_session(date_et))
         half = False

@@ -2,6 +2,7 @@ import unittest
 
 import pandas as pd
 
+from config import Config
 from episode_analysis import build_episode_analysis
 
 
@@ -21,7 +22,9 @@ def _row(
     return {
         "SnapshotAsOfET": f"{date}T09:00:00-05:00",
         "Ticker": ticker,
-        "TradePlanVersion": "v1.3.0-shadow",
+        "TradePlanVersion": Config.TRADE_PLAN_VERSION,
+        "PlanMeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
+        "V13MeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
         "PlanSelectedLeg": leg,
         "SelectedLeg": leg,
         "OrderType": order_type,
@@ -247,6 +250,42 @@ class EpisodeKpiTests(unittest.TestCase):
         )
         self.assertEqual("minimum_reached", analysis.summary["maturity"]["stage"])
         self.assertTrue(analysis.summary["by_selected_leg"][0]["tuning_ready"])
+
+    def test_old_measurement_versions_cannot_unlock_tuning_gate(self):
+        current = _row(
+            "2026-01-05",
+            "CURRENT",
+            "completed",
+            lifecycle_end="2026-01-05",
+            filled=True,
+            r_lower=0.25,
+            r_upper=0.25,
+        )
+        old_rows = []
+        for index in range(60):
+            row = _row(
+                f"2026-02-{(index % 28) + 1:02d}",
+                f"OLD{index:03d}",
+                "completed",
+                lifecycle_end=f"2026-02-{(index % 28) + 1:02d}",
+                filled=True,
+                r_lower=1,
+                r_upper=1,
+            )
+            row["TradePlanVersion"] = "v1.3.0-shadow"
+            row["PlanMeasurementVersion"] = "v1.3.0-shadow"
+            row["V13MeasurementVersion"] = "v1.3.0-shadow"
+            old_rows.append(row)
+
+        analysis = build_episode_analysis(pd.DataFrame([current, *old_rows]))
+
+        self.assertEqual(61, analysis.summary["input_signals"])
+        self.assertEqual(60, analysis.summary["excluded_version_signals"])
+        self.assertEqual(1, analysis.summary["raw_signals"])
+        self.assertEqual(1, analysis.summary["overall"]["completed_r"])
+        self.assertFalse(
+            analysis.summary["maturity"]["parameter_tuning_allowed"]
+        )
 
 
 if __name__ == "__main__":

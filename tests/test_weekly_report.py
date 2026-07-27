@@ -1,18 +1,25 @@
 import unittest
 import sys
 import types
+import tempfile
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pandas as pd
+
+from config import Config
 # Codex 隨附的最小 Python 不含 requests；本測試只驗證純計算與文案，
 # 不會呼叫 GitHub/Notion HTTP 路徑。
 sys.modules.setdefault("requests", types.SimpleNamespace())
 
 import weekly_report
+from snapshot_schema import SNAPSHOT_COLUMNS, write_failure_snapshot
 from weekly_report import (
     build_message,
     calibration_engine,
     notion_calibration_stats,
     summarize_calibration_rows,
+    select_daily_artifacts,
     v12_calibration_ready,
 )
 
@@ -53,6 +60,148 @@ def _aggregate():
         "warn_regulars": [],
         "dip": {"available": False},
     }
+
+
+class SnapshotArchiveTests(unittest.TestCase):
+    def test_new_snapshots_are_archived_through_canonical_writer(self):
+        frame = pd.DataFrame([{
+            "Ticker": "TEST",
+            "Priority": 7,
+            "Score": 7.5,
+            "SnapshotSchemaVersion": "v1.3.1",
+            "SnapshotAsOfET": "2026-07-27T09:00:00-04:00",
+            "DataBarDate": "2026-07-24",
+            "ScanSession": "premarket",
+            "ScanAfterOpen": 0,
+            "SnapshotTimingSource": "xnys",
+            "PreGapStatus": "disabled",
+            "SignalEngineVersion": Config.SIGNAL_ENGINE_VERSION,
+            "MeasurementVersion": Config.MEASUREMENT_VERSION,
+            "SelectedLeg": "none",
+            "LegAnchor": "none",
+            "TradePlanStatus": "not_applicable",
+            "TradePlanVersion": Config.TRADE_PLAN_VERSION,
+            "PlanMeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
+            "PlanSelectedLeg": "none",
+            "OrderType": "none",
+            "PlanAnchor": "none",
+            "PlanAnchorPrice": pd.NA,
+            "PlanEarliestEntryDate": "2026-07-27",
+        }])
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            weekly_report.archive_daily_csv(
+                frame,
+                "2026-07-27",
+                report_root=report_root,
+            )
+            archived = pd.read_csv(
+                report_root / "daily" / "2026-07-27.csv",
+                encoding="utf-8-sig",
+            )
+
+        self.assertEqual(list(SNAPSHOT_COLUMNS), list(archived.columns))
+
+    def test_later_failure_does_not_replace_successful_premarket_snapshot(self):
+        premarket = pd.DataFrame([{
+            "SnapshotRecordType": "data",
+            "Priority": 7,
+            "ScanSession": "premarket",
+        }])
+        failure = pd.DataFrame([{
+            "SnapshotRecordType": "control",
+            "SnapshotRunStatus": "error",
+        }])
+        candidates = [
+            {
+                "id": 1,
+                "et_date": "2026-07-27",
+                "created_at": weekly_report.datetime(
+                    2026, 7, 27, 13, 5, tzinfo=weekly_report.timezone.utc
+                ),
+                "frame": premarket,
+            },
+            {
+                "id": 2,
+                "et_date": "2026-07-27",
+                "created_at": weekly_report.datetime(
+                    2026, 7, 27, 18, 0, tzinfo=weekly_report.timezone.utc
+                ),
+                "frame": failure,
+            },
+        ]
+
+        selected = select_daily_artifacts(candidates)
+
+        self.assertEqual([1], [item["id"] for item in selected])
+
+    def test_preopen_success_outranks_later_after_open_rerun(self):
+        preopen = pd.DataFrame([{
+            "SnapshotRecordType": "data",
+            "Priority": 7,
+            "ScanSession": "preopen",
+        }])
+        after_open = pd.DataFrame([{
+            "SnapshotRecordType": "data",
+            "Priority": 8,
+            "ScanSession": "after_open",
+        }])
+        candidates = [
+            {
+                "id": 3,
+                "et_date": "2026-07-27",
+                "created_at": weekly_report.datetime(
+                    2026, 7, 27, 7, 30, tzinfo=weekly_report.timezone.utc
+                ),
+                "frame": preopen,
+            },
+            {
+                "id": 4,
+                "et_date": "2026-07-27",
+                "created_at": weekly_report.datetime(
+                    2026, 7, 27, 15, 0, tzinfo=weekly_report.timezone.utc
+                ),
+                "frame": after_open,
+            },
+        ]
+
+        selected = select_daily_artifacts(candidates)
+
+        self.assertEqual([3], [item["id"] for item in selected])
+
+    def test_control_only_day_is_selected_and_permanently_archived(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact_path = root / "artifact.csv"
+            write_failure_snapshot(
+                artifact_path,
+                "upstream unavailable",
+                error_type="DataUnavailable",
+            )
+            control = pd.read_csv(artifact_path, encoding="utf-8-sig")
+            candidates = [{
+                "id": 9,
+                "et_date": "2026-07-27",
+                "created_at": weekly_report.datetime(
+                    2026, 7, 27, 13, 5, tzinfo=weekly_report.timezone.utc
+                ),
+                "frame": control,
+            }]
+
+            selected = select_daily_artifacts(candidates)
+            weekly_report.archive_daily_csv(
+                selected[0]["frame"],
+                selected[0]["et_date"],
+                report_root=root / "reports",
+            )
+            archived = pd.read_csv(
+                root / "reports" / "daily" / "2026-07-27.csv",
+                encoding="utf-8-sig",
+            )
+
+        self.assertEqual([9], [item["id"] for item in selected])
+        self.assertEqual("control", archived.iloc[0]["SnapshotRecordType"])
+        self.assertEqual("error", archived.iloc[0]["SnapshotRunStatus"])
 
 
 class CalibrationEngineTests(unittest.TestCase):

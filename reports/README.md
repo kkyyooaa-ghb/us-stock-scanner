@@ -9,8 +9,13 @@
 - `weekly/YYYY-MM-DD_YYYY-MM-DD.md`:歷史週報。
 - `weekly/YYYY-MM-DD_YYYY-MM-DD.json`:歷史統計快照。
 - `daily/YYYY-MM-DD.csv`:每日完整掃描結果，供後續 P9 回測與週報重算。
+  V1.3.1 起由 canonical 92 欄 schema 寫入，正常、空結果與錯誤 artifact
+  共用同一欄位契約；休市與錯誤 control 也會永久歸檔但不進股票彙總；
+  `PreGapStatus` 可區分無盤前成交與抓取失敗。
 - `shadow_performance.csv`:V1.3 TradePlan 的獨立成交、R 區間、
-  D+20/40/60、MFE/MAE 與企業行動量尺；不與 Notion legacy R 混算。
+  D+20/40/60、MFE/MAE 與企業行動量尺；成交與報酬由不可變的
+  `PlanEarliestEntryDate` 起算，as-of 為最後完整交易日，不與 Notion
+  legacy R 或舊 shadow 版本混算。
 - `shadow_episodes.csv`:依 ticker 交易生命週期去重後的獨立 episodes。
 - `shadow_episode_summary.json`:filled/unfilled/open/completed、腿別與
   order type KPI，以及 60～100 筆成熟度閘門。

@@ -6,6 +6,7 @@ import unittest
 import pandas as pd
 
 from build_shadow_episodes import main
+from config import Config
 
 
 class EpisodeCliTests(unittest.TestCase):
@@ -19,7 +20,9 @@ class EpisodeCliTests(unittest.TestCase):
             pd.DataFrame([{
                 "SnapshotAsOfET": "2026-01-05T09:00:00-05:00",
                 "Ticker": "TEST",
-                "TradePlanVersion": "v1.3.0-shadow",
+                "TradePlanVersion": Config.TRADE_PLAN_VERSION,
+                "PlanMeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
+                "V13MeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
                 "PlanSelectedLeg": "consolidation_dip",
                 "OrderType": "buy_limit_zone",
                 "V13MeasurementStatus": "completed",

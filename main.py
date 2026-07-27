@@ -36,7 +36,9 @@ from sources import (
     get_quarter_revenue_score,                      # 原月營收位(D3)
     get_premarket_quote,                            # D7 新訊號:個股盤前跳空
     is_in_scan_window,
+    is_premarket_quote_window,
     is_trading_day,                                 # V1.1.1 交易日護欄(P2)
+    resolve_plan_entry_timing,
     ET_TZ,
 )
 from analyzers import (
@@ -50,7 +52,16 @@ from analyzers import (
     analyze_otc_index,                              # 小型股 ^RUT
 )
 from outputs import sync_notion, send_telegram
-from snapshot_metadata import finalize_theme_metadata
+from snapshot_metadata import (
+    finalize_snapshot_timing,
+    finalize_theme_metadata,
+    latest_complete_bar_levels,
+)
+from snapshot_schema import (
+    write_failure_snapshot,
+    write_skipped_snapshot,
+    write_snapshot,
+)
 from trade_plan import (
     build_shadow_trade_plan,
     strategy_config_hash,
@@ -97,6 +108,11 @@ def run_scanner():
             print(f"  🏖️  今天美東休市({td['date']}:{td['reason']})")
             print(f"  → 跳過掃描(不發 TG、不寫 Notion、不耗 API)")
             print(f"  → 若需強制執行,workflow_dispatch 設 FORCE_RUN=true")
+            write_skipped_snapshot(
+                "scan_result.csv",
+                f"{td['date']}:{td['reason']}",
+                skip_type="NonTradingSession",
+            )
             return
     elif td["ok"] and td["half_day"]:
         # 半日市仍照常掃描(盤前邏輯不變),僅標記提醒
@@ -131,9 +147,16 @@ def run_scanner():
 
     # ========== 第三件事:個股掃描 ==========
     print(f"\n🛡️  下載 {len(Config.SCAN_POOL)} 檔股價...")
+    price_download_started_et = datetime.now(ET_TZ)
+    price_download_timing = resolve_plan_entry_timing(price_download_started_et)
     price_data, data_source = download_stock_history(Config.SCAN_POOL)
     if price_data.empty:
         print("❌ 股價下載失敗")
+        write_failure_snapshot(
+            "scan_result.csv",
+            "download_stock_history returned no rows",
+            error_type="DataUnavailable",
+        )
         return
     print(f"  📌 本次資料源:{data_source}")
 
@@ -169,8 +192,24 @@ def run_scanner():
     # 但保留防呆 — 若出現今日盤中部分資料,一律剔除,確保用 T-1 完整日線
     et_now        = datetime.now(ET_TZ)
     today_str     = et_now.strftime('%Y-%m-%d')
-    market_closed = et_now.hour >= 17   # 美東 17:00 後視為收盤完整
     snapshot_as_of_et = et_now.isoformat()
+    entry_timing = resolve_plan_entry_timing(et_now)
+    # 以下載開始時刻凍結日 K 完整性；下載跨過收盤也不採用先前抓到的 partial bar。
+    market_closed = bool(
+        price_download_timing.get("current_daily_bar_complete", False)
+    )
+    if not entry_timing["ok"]:
+        print(f"  ⚠️  TradePlan 成交起日無法解析:{entry_timing['reason']}"
+              " → shadow plan fail-closed")
+    default_pre_gap_status = (
+        "disabled"
+        if not Config.PREMARKET_GAP_ENABLED
+        else (
+            "pending"
+            if is_premarket_quote_window(et_now)
+            else "outside_premarket_window"
+        )
+    )
     git_commit_sha = os.environ.get("GITHUB_SHA", "")[:40]
     config_hash = strategy_config_hash()
     universe_ver = universe_version()
@@ -260,8 +299,8 @@ def run_scanner():
             yoy_val = mr["yoy"] if mr.get("ok") else None
 
             prev_close_v = float(hist.iloc[-2]) if len(hist) >= 2 else 0.0
-            day_low_v    = float(low.iloc[-1])  if len(low) > 0   else 0.0
-            previous_high_v = float(high.iloc[-2]) if len(high) >= 2 else 0.0
+            # 超賣反彈以訊號棒（最後一根完整日 K）高點確認突破。
+            signal_bar_high_v, day_low_v = latest_complete_bar_levels(high, low)
 
             # ── 計分核心(V1.2.0,D9:逢低三腿 + YoY否決 + 吸籌降 0)──
             signal_decision = determine_status_details(
@@ -276,11 +315,21 @@ def run_scanner():
             shadow_plan = build_shadow_trade_plan(
                 signal_decision,
                 price=price,
-                previous_high=previous_high_v,
+                signal_bar_high=signal_bar_high_v,
                 day_low=day_low_v,
                 ma20=ma20,
                 ma60=ma60,
                 atr=atr,
+                earliest_entry_date=entry_timing["earliest_entry_date"],
+            )
+            leg_anchor_price = (
+                shadow_plan.anchor_price
+                if signal_decision.selected_leg.value != "none"
+                else (
+                    round(signal_bar_high_v, 2)
+                    if signal_decision.anchor.value == "previous_high"
+                    else (signal_decision.anchor_price or None)
+                )
             )
 
             five_day_high = round(float(high.tail(5).max()), 2) if len(high) >= 5 else price
@@ -347,6 +396,7 @@ def run_scanner():
                 'DistATRMult':   round(dist_atr_mult, 2),
                 'YoY':           mr.get("yoy") if mr.get("ok") else None,
                 'PreGapPct':     None,   # V1.3:完成全池分析後補抓
+                'PreGapStatus':  default_pre_gap_status,
                 # ── V1.3 shadow:正式腿別與版本化決策 ──
                 'SignalEngineVersion': Config.SIGNAL_ENGINE_VERSION,
                 'MeasurementVersion':  Config.MEASUREMENT_VERSION,
@@ -355,11 +405,14 @@ def run_scanner():
                 'UniverseVersion':     universe_ver,
                 'SnapshotAsOfET':      snapshot_as_of_et,
                 'DataBarDate':         str(hist.index[-1].date()),
+                'ScanSession':         entry_timing["scan_session"],
+                'ScanAfterOpen':       int(entry_timing["scan_after_open"]),
+                'SnapshotTimingSource': entry_timing["source"],
                 'CandidateLeg':        signal_decision.candidate_leg.value,
                 'SelectedLeg':         signal_decision.selected_leg.value,
                 'LegScoreRaw':         signal_decision.leg_score_raw,
                 'LegAnchor':           signal_decision.anchor.value,
-                'LegAnchorPrice':      signal_decision.anchor_price or None,
+                'LegAnchorPrice':      leg_anchor_price,
                 'VetoReason':          signal_decision.veto_reason,
                 # ── 可再生性低的市場環境 ──
                 'MarketBias':          macro.get("bias", "neutral"),
@@ -392,6 +445,10 @@ def run_scanner():
             print(f"  ⚠️  {ticker} 處理失敗:{e}")
             continue
 
+    if not results:
+        print("⚠️  掃描完成但沒有可用股票列")
+        write_snapshot(pd.DataFrame(), "scan_result.csv")
+        return
     df_all = pd.DataFrame(results).sort_values('Score', ascending=False)
 
     # ========== 主題共振加分(規則原樣;標籤換美股 D1) ==========
@@ -455,8 +512,27 @@ def run_scanner():
         print(f"  ✓ {row['Ticker']:8s}  {row['Price']:9.2f}  量比:{row['VolRatio']:.2f}  {row['Status']}")
 
     # ========== V1.3:完整母體盤前跳空(不可回補的 forward 資料) ==========
-    if Config.PREMARKET_GAP_ENABLED and len(df_all) > 0:
+    pregap_window_open = is_premarket_quote_window(datetime.now(ET_TZ))
+    resolved_gap_status = (
+        "disabled"
+        if not Config.PREMARKET_GAP_ENABLED
+        else (
+            "pending"
+            if pregap_window_open
+            else "outside_premarket_window"
+        )
+    )
+    if len(df_all) > 0:
+        df_all["PreGapStatus"] = resolved_gap_status
+    if len(df_go) > 0:
+        df_go["PreGapStatus"] = resolved_gap_status
+
+    if (Config.PREMARKET_GAP_ENABLED
+            and pregap_window_open
+            and len(df_all) > 0):
         print(f"\n⚡ 全掃描母體盤前跳空檢查({len(df_all)} 檔)...")
+        status_before_pregap = df_all["Status"].copy()
+        go_status_before_pregap = df_go["Status"].copy()
         for i, row in df_all.iterrows():
             tk = row['Ticker']
             try:
@@ -464,8 +540,10 @@ def run_scanner():
                 if q.get("ok") and q.get("session") == "premarket":
                     gp = q["gap_pct"]
                     df_all.at[i, 'PreGapPct'] = gp
+                    df_all.at[i, 'PreGapStatus'] = "available"
                     if i in df_go.index:
                         df_go.at[i, 'PreGapPct'] = gp
+                        df_go.at[i, 'PreGapStatus'] = "available"
                     note = _premarket_gap_note(gp)
                     if note:
                         new_status = row['Status'] + f" | {note}"
@@ -476,10 +554,58 @@ def run_scanner():
                     else:
                         print(f"  {tk:8s} 盤前 {gp:+.2f}%(平穩)")
                 else:
+                    gap_status = (
+                        "no_premarket_trade"
+                        if q.get("ok")
+                        else "fetch_error"
+                    )
+                    df_all.at[i, 'PreGapStatus'] = gap_status
+                    if i in df_go.index:
+                        df_go.at[i, 'PreGapStatus'] = gap_status
                     print(f"  {tk:8s} 無盤前報價({q.get('err', q.get('session', ''))})")
             except Exception as e:
+                df_all.at[i, 'PreGapStatus'] = "fetch_error"
+                if i in df_go.index:
+                    df_go.at[i, 'PreGapStatus'] = "fetch_error"
                 print(f"  ⚠️  {tk} 盤前跳空檢查失敗:{e}")
             time.sleep(0.3)
+        if not is_premarket_quote_window(datetime.now(ET_TZ)):
+            df_all["PreGapPct"] = None
+            df_all["PreGapStatus"] = "outside_premarket_window"
+            df_all["Status"] = status_before_pregap
+            df_go["PreGapPct"] = None
+            df_go["PreGapStatus"] = "outside_premarket_window"
+            df_go["Status"] = go_status_before_pregap
+            print("  ⚠️  盤前抓取跨越開盤，整批 PreGap 作廢以避免混合時點")
+        else:
+            gap_available = int((df_all["PreGapStatus"] == "available").sum())
+            print(f"  📐 盤前跳空覆蓋:{gap_available}/{len(df_all)} "
+                  f"({gap_available / len(df_all):.1%})")
+    elif Config.PREMARKET_GAP_ENABLED and len(df_all) > 0:
+        print(f"\n⏭️  {entry_timing['scan_session']} 補跑:"
+              "不抓盤前跳空，PreGapStatus 已標記")
+
+    # 所有不可回補欄位完成後再封存時點；若跨過開盤，整批 plan 一律順延。
+    snapshot_finalized_et = datetime.now(ET_TZ)
+    finalized_entry_timing = resolve_plan_entry_timing(snapshot_finalized_et)
+    if (
+        finalized_entry_timing.get("earliest_entry_date")
+        != entry_timing.get("earliest_entry_date")
+        or finalized_entry_timing.get("scan_session")
+        != entry_timing.get("scan_session")
+    ):
+        print("  ⚠️  掃描跨越成交時點邊界，TradePlan 已按封存時點整批重訂起日")
+    entry_timing = finalized_entry_timing
+    df_all = finalize_snapshot_timing(
+        df_all,
+        timing=entry_timing,
+        snapshot_as_of_et=snapshot_finalized_et.isoformat(),
+    )
+    df_go = finalize_snapshot_timing(
+        df_go,
+        timing=entry_timing,
+        snapshot_as_of_et=snapshot_finalized_et.isoformat(),
+    )
 
     # ========== 決策摘要(前移供 Notion 大盤燈號用 — 原 V13.9.3) ==========
     decision = {}
@@ -657,7 +783,7 @@ def run_scanner():
     send_telegram(msg)
 
     # 儲存 CSV
-    df_all.to_csv("scan_result.csv", index=False, encoding='utf-8-sig')
+    write_snapshot(df_all, "scan_result.csv")
     print(f"\n💾 scan_result.csv 已儲存")
     print(f"✅ 完成!耗時 {elapsed}s\n")
 
@@ -670,16 +796,10 @@ if __name__ == "__main__":
         print(f"❌ 主程式崩潰:{type(e).__name__}: {e}")
         print("=" * 55)
         traceback.print_exc()
-        # 即使崩潰也寫入空 CSV,避免 upload-artifact 找不到檔案
-        with open("scan_result.csv", "w", encoding="utf-8-sig") as f:
-            f.write("Ticker,Price,MA20,MA60,VolRatio,Support,Resistance,Position,Status,"
-                    "Priority,Score,ConsecDays,DistMA60Pct,DistTag,EntryLow,EntryHigh,"
-                    "StopLoss,ATR,ATR_Pct,DistDirection,DistATRMult,YoY,PreGapPct,"
-                    "RSI,VolDry,NearMA60,Oversold,RsiTurnUp,HoldMA,SetupType,"
-                    "SignalEngineVersion,MeasurementVersion,CandidateLeg,SelectedLeg,"
-                    "LegScoreRaw,VetoReason,TradePlanStatus,TradePlanVersion,"
-                    "PlanMeasurementVersion,OrderType,"
-                    "PlanAnchor,TriggerPrice,PlanEntryLow,PlanEntryHigh,PlanStopLoss\n")
-            f.write(f"ERROR,0,0,0,0,0,0,-,{type(e).__name__}: {e},-99,-99,0,0,-,0,0,0,0,0,,0,,,"
-                    "-1,0,0,0,0,0,none\n")
+        # 即使崩潰也用 canonical schema 寫 control row，供 artifact 稽核。
+        write_failure_snapshot(
+            "scan_result.csv",
+            str(e),
+            error_type=type(e).__name__,
+        )
         sys.exit(1)

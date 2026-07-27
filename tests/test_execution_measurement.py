@@ -2,6 +2,7 @@ import unittest
 
 import pandas as pd
 
+from config import Config
 from execution_measurement import MeasurementStatus, evaluate_trade_plan
 from trade_plan import OrderType, PlanAnchor, SignalLeg, TradePlan
 
@@ -15,11 +16,12 @@ def _plan(
     stop=90.0,
     valid_days=3,
     time_exit_days=1,
+    earliest_entry_date="2026-01-05",
 ) -> TradePlan:
     return TradePlan(
         status="shadow_ready",
-        version="v1.3.0-shadow",
-        measurement_version="v1.3.0-shadow",
+        version=Config.TRADE_PLAN_VERSION,
+        measurement_version=Config.SHADOW_MEASUREMENT_VERSION,
         selected_leg=SignalLeg.CONSOLIDATION_DIP,
         order_type=order_type,
         anchor=PlanAnchor.MA60,
@@ -32,6 +34,7 @@ def _plan(
         time_exit_days=time_exit_days,
         stop_type="intraday",
         exit_rule="initial_stop_or_d40_close",
+        earliest_entry_date=earliest_entry_date,
     )
 
 
@@ -140,8 +143,122 @@ class CorporateActionTests(unittest.TestCase):
         self.assertEqual(0.9, result.r_upper)
         self.assertEqual("2026-01-06", result.lifecycle_end_date)
 
+    def test_split_on_first_eligible_session_normalizes_to_plan_prices(self):
+        history = _history([
+            (100, 102, 99, 100, 0.0, 0.0),
+            (50, 52, 49, 51, 0.0, 2.0),
+        ])
+        result = evaluate_trade_plan(
+            "2026-01-05",
+            history,
+            _plan(
+                OrderType.BUY_LIMIT_ZONE,
+                earliest_entry_date="2026-01-06",
+                valid_days=1,
+                time_exit_days=5,
+            ),
+        )
+
+        self.assertEqual(MeasurementStatus.OPEN, result.status)
+        self.assertEqual("2026-01-06", result.fill_date)
+        self.assertEqual(100.0, result.fill_price)
+        self.assertEqual(2.0, result.ending_split_factor)
+
 
 class HorizonAndLifecycleTests(unittest.TestCase):
+    def test_future_entry_window_is_awaiting_not_no_data(self):
+        result = evaluate_trade_plan(
+            "2026-01-09",
+            pd.DataFrame(),
+            _plan(
+                OrderType.BUY_LIMIT_ZONE,
+                earliest_entry_date="2026-01-12",
+            ),
+            measurement_as_of_date="2026-01-11",
+        )
+
+        self.assertEqual(MeasurementStatus.AWAITING_FILL, result.status)
+        self.assertEqual("entry_window_not_started", result.reason)
+        self.assertFalse(result.entry_window_complete)
+        self.assertIsNone(result.lifecycle_end_date)
+
+    def test_new_measurement_rejects_missing_entry_date_and_old_version(self):
+        history = _history([(100, 105, 95, 102)])
+        missing_date = _plan(
+            OrderType.BUY_LIMIT_ZONE,
+            earliest_entry_date=None,
+        )
+        old_version = _plan(OrderType.BUY_LIMIT_ZONE)
+        object.__setattr__(old_version, "measurement_version", "v1.3.0-shadow")
+
+        missing_result = evaluate_trade_plan(
+            "2026-01-05",
+            history,
+            missing_date,
+        )
+        old_result = evaluate_trade_plan(
+            "2026-01-05",
+            history,
+            old_version,
+        )
+
+        self.assertEqual(MeasurementStatus.INVALID_PLAN, missing_result.status)
+        self.assertEqual(
+            "missing_or_invalid_earliest_entry_date",
+            missing_result.reason,
+        )
+        self.assertEqual(MeasurementStatus.INVALID_PLAN, old_result.status)
+        self.assertIn("measurement_version_mismatch", old_result.reason)
+
+    def test_non_executable_leg_cannot_produce_r(self):
+        history = _history([(100, 105, 95, 102)])
+        plan = _plan(OrderType.BUY_LIMIT_ZONE)
+        object.__setattr__(plan, "selected_leg", SignalLeg.NONE)
+        object.__setattr__(plan, "anchor", PlanAnchor.NONE)
+
+        result = evaluate_trade_plan("2026-01-05", history, plan)
+
+        self.assertEqual(MeasurementStatus.INVALID_PLAN, result.status)
+        self.assertEqual("plan_not_evaluable", result.reason)
+
+    def test_entry_and_horizons_start_on_immutable_earliest_entry_date(self):
+        history = _history([
+            (95, 105, 85, 100),
+            (95, 105, 95, 103),
+        ])
+        result = evaluate_trade_plan(
+            "2026-01-05",
+            history,
+            _plan(
+                OrderType.BUY_STOP_RECLAIM,
+                valid_days=1,
+                time_exit_days=5,
+                earliest_entry_date="2026-01-06",
+            ),
+        )
+
+        self.assertEqual("2026-01-06", result.fill_date)
+        self.assertEqual(MeasurementStatus.OPEN, result.status)
+
+        horizon_rows = [(100, 101, 99, 100)]
+        for offset in range(21):
+            close = 200 + offset
+            horizon_rows.append((close, close + 1, close - 1, close))
+        horizon_result = evaluate_trade_plan(
+            "2026-01-05",
+            _history(horizon_rows),
+            _plan(
+                OrderType.BUY_STOP_RECLAIM,
+                trigger=1000,
+                entry_low=1000,
+                entry_high=1000,
+                stop=900,
+                valid_days=1,
+                earliest_entry_date="2026-01-06",
+            ),
+        )
+        self.assertEqual(10.0, horizon_result.d20_total_return_pct)
+
     def test_unfilled_trade_never_gets_an_r_value(self):
         history = _history([
             (110, 115, 105, 112),
@@ -178,7 +295,7 @@ class HorizonAndLifecycleTests(unittest.TestCase):
         self.assertIsNone(result.r_upper)
         self.assertEqual(0.5, result.mark_r)
 
-    def test_d20_d40_d60_are_total_returns_from_scan_close(self):
+    def test_d20_d40_d60_are_total_returns_from_entry_eligible_close(self):
         rows = []
         for day in range(61):
             close = 100.0 + day

@@ -28,12 +28,13 @@ Status: resolved
 - `veto_reason`：否決原因，不再從顯示文字解析。
 - 舊 `determine_status()` tuple 介面保留為 compatibility adapter。
 
-### TradePlan V1.3.0-shadow
+### TradePlan V1.3.1-shadow
 
 - 盤整腿：
   - 價格低於 MA60：`buy_stop_reclaim`，等收復 MA60。
   - 價格位於 MA60 上方：`buy_limit_zone`，只在 MA60 附近成交。
-- 超賣腿：`buy_stop_reclaim`，突破前一完整交易日高點才確認反彈。
+- 超賣腿：`buy_stop_reclaim`，突破訊號棒（掃描時最後一根完整交易日）
+  高點才確認反彈；不得誤用訊號棒前一日高點。
 - 守均線腿：`buy_limit_zone`，必須使用實際觸發的 MA20 或 MA60。
 - 初始停損為盤中觸價；V1 只使用初始停損與 D+40 時間出場。
 - 移動停損、停利、分批出場與均線出場不納入本 shadow 版本。
@@ -52,11 +53,38 @@ Status: resolved
 - `PreGapPct` 必須回寫全池 DataFrame 後再封存。
 - 舊 `SetupType` 保留，另加 `DiagnosticSetupTypeV1` 明示其診斷性質。
 
-## V1.3.0-shadow 成交量尺
+### Snapshot contract v1.3.1
+
+- `snapshot_schema.py` 是正式、空結果與錯誤 `scan_result.csv` 的唯一 schema
+  與 writer；workflow 不再自行保存 header 字串。
+- 92 欄 canonical schema 以 `SnapshotSchemaVersion`、
+  `SnapshotRecordType`、`SnapshotRunStatus` 區分資料與 control row。
+- 未登記欄位、ready plan 腿別／anchor 不一致、非法 `PreGapStatus` 會
+  fail-closed，不可靜默丟欄或寫入矛盾快照。
+- `PreGapStatus` 值域為 `available`、`no_premarket_trade`、
+  `fetch_error`、`outside_premarket_window`、`disabled`；只有
+  `available` 可帶 `PreGapPct`。
+- PreGap 抓取窗只由 ET 04:00–09:30 判定，不依賴 XNYS calendar；
+  抓取若跨過開盤，整批數值作廢，避免同份快照混合盤前與 regular session。
+- `TradePlanVersion` 與 shadow measurement 使用 `v1.3.1-shadow`；
+  舊版本不得用新時間規則重新解讀。
+- `shadow_ready` 只允許三條正式腿與對應 anchor，且必須帶完整可執行欄位；
+  empty、休市跳過與錯誤均為 typed control row。
+
+## V1.3.1-shadow 成交量尺
 
 - 輸入必須是 `auto_adjust=False` 的 as-traded OHLC，並同時下載
   `Dividends` 與 `Stock Splits`。
-- Entry window 從掃描日 D+0 開始，以完整交易日 bar 計算：
+- 每筆 plan 保存不可變的 `PlanEarliestEntryDate`：
+  - 交易日開盤前掃描：當日可成交。
+  - 開盤當下／盤中／盤後補跑：下一個 XNYS session 才可成交。
+  - 休市日強制補跑：下一個 XNYS session 才可成交。
+  - 行事曆失敗：plan 標記 `timing_unavailable`，不得猜測或退回掃描日。
+- 最早成交日以整份快照完成不可回補欄位後的封存時點為準；若掃描跨過
+  09:30 ET，整批 plan 統一順延，不允許部分股票保留 D+0。
+- 當日日 K 只有在行情下載開始時已超過 XNYS close 15 分鐘才視為完整；
+  shadow measurement 的 as-of 使用最後一個完整 session，而非牆鐘日期。
+- Entry window 從 `PlanEarliestEntryDate` 開始，以完整交易日 bar 計算：
   - `buy_limit_zone`：開盤低於 limit 時以開盤成交；否則 low 觸及
     limit 時以 limit 成交。
   - `buy_stop_reclaim`：開盤高於 trigger 時以開盤成交；否則 high
@@ -66,9 +94,9 @@ Status: resolved
 - 未成交計畫在有效窗結束後標記 `unfilled`，不得產生 R。
 - 成交後若後續開盤直接低於 stop，以該日 open 作為 gap-through 出場，
   因此 R 可以小於 -1。
-- 拆股以累積持股倍數把後續 raw OHLC 正規化回掃描日基準；現金股息換算為
+- 拆股以累積持股倍數把後續 raw OHLC 正規化回計畫價格基準；現金股息換算為
   每一原始股的持有期現金流後納入總損益。
-- D+20/40/60 是從掃描日收盤起算、包含拆股與股息的總報酬；MFE/MAE
+- D+20/40/60 是從最早可成交日收盤起算、包含拆股與股息的總報酬；MFE/MAE
   則以實際成交風險單位表示。
 - 初始停損或成交後 D+40 收盤完成交易；一般未完成樣本只輸出 mark R。
   若 entry bar 本身雙觸，先保存悲觀下界 -1，樂觀上界待後續路徑完成。
@@ -103,6 +131,8 @@ Status: resolved
   - 腿別／order type 至少各 20 筆 completed-R，且全體閘門已通過，
     才標記該 segment 為 tuning-ready。
   - 閘門只授權分析，不會自動修改任何權重。
+- Episode 建構前必須同時符合目前 `TradePlanVersion`、
+  `PlanMeasurementVersion` 與 `V13MeasurementVersion`；舊世代 R 不得解鎖閘門。
 - 每週輸出 `shadow_episodes.csv`、`shadow_episode_summary.json` 與
   `shadow_episode_summary.md`。
 
@@ -118,6 +148,12 @@ Status: resolved
 8. 同一 ticker 的生命週期內重複訊號只形成一個 episode。
 9. Episode 報告能分層顯示腿別、order type 與 R 上下界。
 10. 未達 60 筆 completed-R 前，調參閘門保持關閉。
+11. 超賣腿 trigger 使用訊號棒高點，不得使用 T-2 高點。
+12. 盤中／盤後補跑的成交與 horizon 不得從計畫存在前的日線起算。
+13. 正常、空結果與錯誤快照使用相同 canonical schema。
+14. PreGap 缺值可區分無盤前成交、抓取失敗與非盤前補跑。
+15. 掃描跨過開盤、行情下載跨過收盤與盤前立即量測均不得產生 look-ahead。
+16. 舊版量尺、非法腿別或不完整 TradePlan 不得進入 completed-R 閘門。
 
 ## 非目標
 

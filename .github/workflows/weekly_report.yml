@@ -51,7 +51,7 @@ jobs:
           cache: 'pip'
 
       - name: 安裝相依套件
-        run: pip install pandas requests yfinance
+        run: pip install -r requirements.txt
 
       - name: P1 績效回填(track_performance)
         continue-on-error: true    # 回填失敗不擋週報(週報端讀不到會優雅跳過)
