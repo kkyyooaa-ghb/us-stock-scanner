@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
+from config import Config
 from snapshot_schema import snapshot_data_rows, write_snapshot
 
 try:
@@ -160,14 +161,27 @@ def select_daily_artifacts(candidates: list[dict]) -> list[dict]:
 # 1.5 永久保存每日 CSV(供回測/重算;不再依賴會過期的 Actions artifacts)
 # ==========================================================================
 def archive_daily_csv(df, et_date: str, report_root: Path = REPORT_ROOT) -> str:
-    """把去重後的每日完整掃描 CSV 保存到 reports/daily/YYYY-MM-DD.csv。"""
+    """把去重後的每日完整掃描 CSV 保存到 reports/daily/YYYY-MM-DD.csv。
+
+    ⚠️ 舊版 artifact 一律原樣保存。快照是不可變的歷史事實,不能用今天的
+    schema 重寫 —— 硬套現行契約只會在版本升級當週讓整份週報中止歸檔,
+    而那正是最需要把資料保下來的一週。
+    """
     daily_dir = report_root / "daily"
     daily_dir.mkdir(parents=True, exist_ok=True)
     path = daily_dir / f"{et_date}.csv"
-    if "SnapshotSchemaVersion" in df.columns:
+    versions = (
+        set(df["SnapshotSchemaVersion"].dropna().astype(str))
+        if "SnapshotSchemaVersion" in df.columns
+        else set()
+    )
+    if versions == {Config.SNAPSHOT_SCHEMA_VERSION}:
         write_snapshot(df, path)
     else:
-        # 歷史 30 欄 artifact 原樣保存，不杜撰 V1.3 facts。
+        # 歷史 30 欄 artifact 與較舊 schema 版本:原樣保存,不杜撰 V1.3 facts。
+        if versions:
+            print(f"  ℹ️  {et_date} 為舊 schema {sorted(versions)},原樣歸檔"
+                  f"(現行 {Config.SNAPSHOT_SCHEMA_VERSION})")
         df.to_csv(path, index=False, encoding="utf-8-sig")
     return path.relative_to(report_root.parent).as_posix()
 
@@ -381,13 +395,10 @@ def summarize_calibration_rows(rows: list[dict]) -> dict:
         key=lambda t: -t[1],
     )
 
-    def _is_extreme_gap(row):
-        gap = row.get("gap")
-        return gap is not None and abs(gap) >= 5
-
-    ext = [x["r"] for x in rs if _is_extreme_gap(x)]
-    rest = [x["r"] for x in rs if not _is_extreme_gap(x)]
-
+    # 盤前跳空分層已停用(V1.3.2)。Notion 既有的「盤前跳空%」是未版本化的
+    # v0 值,分母誤用 Yahoo regularMarketPreviousClose(盤前 = Close[-2]),
+    # 實測與前一交易日漲跌幅 corr=0.955 —— 那不是跳空。舊值無法與新值區分,
+    # 因此整個分層停用,直到 Notion 端也帶得動 PreGapDefinitionVersion。
     return {
         "measurement_version": LEGACY_MEASUREMENT_VERSION,
         "n_total":    n_total,
@@ -399,8 +410,9 @@ def summarize_calibration_rows(rows: list[dict]) -> dict:
         "avg_d3":     _avg("d3"),
         "avg_d5":     _avg("d5"),
         "dist_stats": dist_stats,
-        "ext_gap":    (len(ext), sum(ext) / len(ext)) if ext else None,
-        "rest_gap":   (len(rest), sum(rest) / len(rest)) if rest else None,
+        "ext_gap":    None,
+        "rest_gap":   None,
+        "gap_stratification": "disabled_unversioned_pregap_v0",
     }
 
 

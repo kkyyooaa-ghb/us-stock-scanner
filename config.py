@@ -48,7 +48,10 @@ class Config:
     TRADE_PLAN_VERSION           = "v1.3.1-shadow"
     MEASUREMENT_VERSION          = "legacy-v0"
     SHADOW_MEASUREMENT_VERSION   = "v1.3.1-shadow"
-    SNAPSHOT_SCHEMA_VERSION      = "v1.3.1"
+    SNAPSHOT_SCHEMA_VERSION      = "v1.3.2"
+    # 盤前跳空定義版本。v0(未版本化)= 分母誤用 Yahoo regularMarketPreviousClose
+    # (實為 Close[-2]),等於多算一個交易日,已知無效、不得進統計。
+    PREGAP_DEFINITION_VERSION    = "v1.3.2-signal-bar-close"
     TRADE_PLAN_TIME_EXIT_DAYS    = 40
     EPISODE_TUNING_MIN_COMPLETED = 60
     EPISODE_TUNING_TARGET        = 100

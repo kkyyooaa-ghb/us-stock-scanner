@@ -68,7 +68,7 @@ class SnapshotArchiveTests(unittest.TestCase):
             "Ticker": "TEST",
             "Priority": 7,
             "Score": 7.5,
-            "SnapshotSchemaVersion": "v1.3.1",
+            "SnapshotSchemaVersion": Config.SNAPSHOT_SCHEMA_VERSION,
             "SnapshotAsOfET": "2026-07-27T09:00:00-04:00",
             "DataBarDate": "2026-07-24",
             "ScanSession": "premarket",
@@ -101,6 +101,64 @@ class SnapshotArchiveTests(unittest.TestCase):
             )
 
         self.assertEqual(list(SNAPSHOT_COLUMNS), list(archived.columns))
+
+    def test_schema_upgrade_week_archives_both_generations(self):
+        """升版當週:舊 artifact 原樣保存,新 artifact 走 canonical writer。
+
+        這是最容易在升版當下弄丟資料的一天 —— 若舊版被硬套現行契約,
+        整份週報會中止,而那份 forward 快照是不可再生的。
+        """
+        def _row(schema_version, bar_date):
+            return {
+                "Ticker": "TEST",
+                "Priority": 7,
+                "Score": 7.5,
+                "SnapshotSchemaVersion": schema_version,
+                "SnapshotAsOfET": f"{bar_date}T09:00:00-04:00",
+                "DataBarDate": bar_date,
+                "ScanSession": "premarket",
+                "ScanAfterOpen": 0,
+                "SnapshotTimingSource": "xnys",
+                "PreGapStatus": "disabled",
+                "SignalEngineVersion": Config.SIGNAL_ENGINE_VERSION,
+                "MeasurementVersion": Config.MEASUREMENT_VERSION,
+                "SelectedLeg": "none",
+                "LegAnchor": "none",
+                "TradePlanStatus": "not_applicable",
+                "TradePlanVersion": Config.TRADE_PLAN_VERSION,
+                "PlanMeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
+                "PlanSelectedLeg": "none",
+                "OrderType": "none",
+                "PlanAnchor": "none",
+                "PlanAnchorPrice": pd.NA,
+                "PlanEarliestEntryDate": bar_date,
+            }
+
+        legacy = pd.DataFrame([_row("v1.3.1", "2026-07-27")])
+        current = pd.DataFrame(
+            [_row(Config.SNAPSHOT_SCHEMA_VERSION, "2026-07-28")]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            weekly_report.archive_daily_csv(legacy, "2026-07-27", report_root)
+            weekly_report.archive_daily_csv(current, "2026-07-28", report_root)
+
+            old = pd.read_csv(
+                report_root / "daily" / "2026-07-27.csv", encoding="utf-8-sig"
+            )
+            new = pd.read_csv(
+                report_root / "daily" / "2026-07-28.csv", encoding="utf-8-sig"
+            )
+
+        # 舊版:欄位與版本標記都保持原樣,絕不被今天的 schema 改寫
+        self.assertEqual(list(legacy.columns), list(old.columns))
+        self.assertEqual(["v1.3.1"], list(old["SnapshotSchemaVersion"]))
+        # 新版:走 canonical writer,補齊完整欄位
+        self.assertEqual(list(SNAPSHOT_COLUMNS), list(new.columns))
+        self.assertEqual(
+            [Config.SNAPSHOT_SCHEMA_VERSION],
+            list(new["SnapshotSchemaVersion"]),
+        )
 
     def test_later_failure_does_not_replace_successful_premarket_snapshot(self):
         premarket = pd.DataFrame([{

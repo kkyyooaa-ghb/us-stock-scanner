@@ -35,6 +35,7 @@ from sources import (
     download_stock_history,
     get_quarter_revenue_score,                      # 原月營收位(D3)
     get_premarket_quote,                            # D7 新訊號:個股盤前跳空
+    get_reference_close,                            # V1.3.2 gap 分母(訊號棒收盤)
     is_in_scan_window,
     is_premarket_quote_window,
     is_trading_day,                                 # V1.1.1 交易日護欄(P2)
@@ -53,6 +54,7 @@ from analyzers import (
 )
 from outputs import sync_notion, send_telegram
 from snapshot_metadata import (
+    demote_stale_bar_plans,
     finalize_snapshot_timing,
     finalize_theme_metadata,
     latest_complete_bar_levels,
@@ -122,20 +124,59 @@ def run_scanner():
     macro = analyze_macro()
 
     # ========== 第二件事:SPY / QQQ 盤前市場環境 ==========
+    # V1.3.2:大盤 gap 與個股同契約 —— 分母一律用「經日期驗證的訊號棒收盤」,
+    # 不用 Yahoo 的 regularMarketPreviousClose(盤前等於 Close[-2],差一個交易日)。
+    market_timing = resolve_plan_entry_timing(datetime.now(ET_TZ))
+    expected_bar_date = market_timing.get("last_complete_session_date")
+    if not expected_bar_date:
+        print(f"  ⚠️  無法解析最後完整交易日({market_timing.get('reason')})"
+              " → 大盤/個股 gap 全部 fail-closed")
+
+    def _index_premarket(ticker: str, label: str) -> dict:
+        """指數 ETF 盤前:先取訊號棒收盤當分母,取不到就不算 gap。"""
+        if not expected_bar_date:
+            return {"ok": False, "status": "stale_reference", "gap_pct": None,
+                    "price": None, "reference_price": None,
+                    "reference_date": None, "reference_basis": "",
+                    "quote_time_et": None,
+                    "definition_version": Config.PREGAP_DEFINITION_VERSION,
+                    "err": "no_expected_bar_date"}
+        ref = get_reference_close(ticker, expected_bar_date=expected_bar_date)
+        if not ref.get("ok"):
+            print(f"  ⚠️  {label} 參考收盤不合格:{ref.get('err', '')}")
+        return get_premarket_quote(
+            ticker,
+            reference_close=ref.get("close"),
+            reference_date=ref.get("bar_date"),
+            expected_bar_date=expected_bar_date,
+        )
+
     print("\n📊 抓取 SPY 盤前報價...")
-    mis_data = get_market_premarket()
+    spy_ref = (get_reference_close(Config.MARKET_PROXY_ETF,
+                                   expected_bar_date=expected_bar_date)
+               if expected_bar_date else {"ok": False, "err": "no_expected_bar_date"})
+    if not spy_ref.get("ok"):
+        print(f"  ⚠️  SPY 參考收盤不合格:{spy_ref.get('err', '')}")
+    mis_data = get_market_premarket(
+        reference_close=spy_ref.get("close"),
+        reference_date=spy_ref.get("bar_date"),
+        expected_bar_date=expected_bar_date,
+    )
     if mis_data.get("ok"):
         print(f"  SPY {mis_data['price']:,.2f} ({mis_data['gap']:+.2f}, "
-              f"{mis_data['gap_pct']:+.2f}%)  時間 {mis_data['trade_time']}")
+              f"{mis_data['gap_pct']:+.2f}%)  基準 {mis_data['reference_price']}"
+              f" @{mis_data['reference_date']}  時間 {mis_data['trade_time']}")
     else:
-        print(f"  ⚠️  SPY 盤前失敗:{mis_data.get('err', '')}")
+        print(f"  ⚠️  SPY 盤前 gap 不可用({mis_data.get('status')})"
+              f":{mis_data.get('err', '')}")
 
-    qqq_data = get_premarket_quote(Config.MARKET_TECH_PROXY_ETF)
+    qqq_data = _index_premarket(Config.MARKET_TECH_PROXY_ETF, "QQQ")
     if qqq_data.get("ok"):
-        print(f"  QQQ {qqq_data['price']:,.2f} "
-              f"({qqq_data['gap_pct']:+.2f}%, {qqq_data['session']})")
+        print(f"  QQQ {qqq_data['price']:,.2f} ({qqq_data['gap_pct']:+.2f}%)"
+              f"  基準 {qqq_data['reference_price']} @{qqq_data['reference_date']}")
     else:
-        print(f"  ⚠️  QQQ 盤前失敗:{qqq_data.get('err', '')}")
+        print(f"  ⚠️  QQQ 盤前 gap 不可用({qqq_data.get('status')})"
+              f":{qqq_data.get('err', '')}")
 
     # 開盤情境(美股版真正接上 — 吃 SPY 盤前 gap;台股版此函式為死碼)
     market_open = analyze_market_open(mis_data)
@@ -397,6 +438,12 @@ def run_scanner():
                 'YoY':           mr.get("yoy") if mr.get("ok") else None,
                 'PreGapPct':     None,   # V1.3:完成全池分析後補抓
                 'PreGapStatus':  default_pre_gap_status,
+                'PreMarketPrice':        None,
+                'PreMarketQuoteTimeET':  None,
+                'PreGapReferencePrice':  None,
+                'PreGapReferenceDate':   None,
+                'PreGapReferenceBasis':  "",
+                'PreGapDefinitionVersion': Config.PREGAP_DEFINITION_VERSION,
                 # ── V1.3 shadow:正式腿別與版本化決策 ──
                 'SignalEngineVersion': Config.SIGNAL_ENGINE_VERSION,
                 'MeasurementVersion':  Config.MEASUREMENT_VERSION,
@@ -421,7 +468,9 @@ def run_scanner():
                 'SpyPrevClose':        mis_data.get("prev_close") if mis_data.get("ok") else None,
                 'SpyGapPct':           mis_data.get("gap_pct") if mis_data.get("ok") else None,
                 'QqqPrice':            qqq_data.get("price") if qqq_data.get("ok") else None,
-                'QqqPrevClose':        qqq_data.get("prev_close") if qqq_data.get("ok") else None,
+                # get_premarket_quote 回 reference_price(訊號棒收盤),
+                # 只有 SPY 的包裝才另外映射成 prev_close。
+                'QqqPrevClose':        qqq_data.get("reference_price") if qqq_data.get("ok") else None,
                 'QqqGapPct':           qqq_data.get("gap_pct") if qqq_data.get("ok") else None,
                 'EsFuturesPct':        macro.get("es_chg"),
                 'NqFuturesPct':        macro.get("nq_chg"),
@@ -533,54 +582,66 @@ def run_scanner():
         print(f"\n⚡ 全掃描母體盤前跳空檢查({len(df_all)} 檔)...")
         status_before_pregap = df_all["Status"].copy()
         go_status_before_pregap = df_go["Status"].copy()
+        def _record_gap(idx, fields: dict) -> None:
+            """同一筆量測同時寫回全池與精選,避免兩份 DataFrame 說法不一。"""
+            for column, value in fields.items():
+                df_all.at[idx, column] = value
+                if idx in df_go.index:
+                    df_go.at[idx, column] = value
+
         for i, row in df_all.iterrows():
             tk = row['Ticker']
             try:
-                q = get_premarket_quote(tk)
-                if q.get("ok") and q.get("session") == "premarket":
+                # 分母 = 本列自己的訊號棒收盤,且該棒日期必須等於預期最後
+                # 完整交易日;ALNY 那類拿到過期 K 棒的股票在此判 stale_reference。
+                q = get_premarket_quote(
+                    tk,
+                    reference_close=row['Price'],
+                    reference_date=str(row['DataBarDate']),
+                    expected_bar_date=expected_bar_date,
+                )
+                _record_gap(i, {
+                    'PreGapStatus':           q["status"],
+                    'PreMarketPrice':         q["price"],
+                    'PreMarketQuoteTimeET':   q["quote_time_et"],
+                    'PreGapReferencePrice':   q["reference_price"],
+                    'PreGapReferenceDate':    q["reference_date"],
+                    'PreGapReferenceBasis':   q["reference_basis"],
+                    'PreGapDefinitionVersion': q["definition_version"],
+                })
+                if q["status"] == "available":
                     gp = q["gap_pct"]
-                    df_all.at[i, 'PreGapPct'] = gp
-                    df_all.at[i, 'PreGapStatus'] = "available"
-                    if i in df_go.index:
-                        df_go.at[i, 'PreGapPct'] = gp
-                        df_go.at[i, 'PreGapStatus'] = "available"
+                    _record_gap(i, {'PreGapPct': gp})
                     note = _premarket_gap_note(gp)
                     if note:
-                        new_status = row['Status'] + f" | {note}"
-                        df_all.at[i, 'Status'] = new_status
-                        if i in df_go.index:
-                            df_go.at[i, 'Status'] = new_status
+                        _record_gap(i, {'Status': row['Status'] + f" | {note}"})
                         print(f"  {tk:8s} {note}")
                     else:
                         print(f"  {tk:8s} 盤前 {gp:+.2f}%(平穩)")
                 else:
-                    gap_status = (
-                        "no_premarket_trade"
-                        if q.get("ok")
-                        else "fetch_error"
-                    )
-                    df_all.at[i, 'PreGapStatus'] = gap_status
-                    if i in df_go.index:
-                        df_go.at[i, 'PreGapStatus'] = gap_status
-                    print(f"  {tk:8s} 無盤前報價({q.get('err', q.get('session', ''))})")
+                    print(f"  {tk:8s} 無有效 gap({q['status']})"
+                          f"{'：' + q['err'] if q.get('err') else ''}")
             except Exception as e:
-                df_all.at[i, 'PreGapStatus'] = "fetch_error"
-                if i in df_go.index:
-                    df_go.at[i, 'PreGapStatus'] = "fetch_error"
+                _record_gap(i, {'PreGapStatus': "fetch_error"})
                 print(f"  ⚠️  {tk} 盤前跳空檢查失敗:{e}")
             time.sleep(0.3)
         if not is_premarket_quote_window(datetime.now(ET_TZ)):
-            df_all["PreGapPct"] = None
-            df_all["PreGapStatus"] = "outside_premarket_window"
-            df_all["Status"] = status_before_pregap
-            df_go["PreGapPct"] = None
-            df_go["PreGapStatus"] = "outside_premarket_window"
-            df_go["Status"] = go_status_before_pregap
+            for frame, restore in ((df_all, status_before_pregap),
+                                   (df_go, go_status_before_pregap)):
+                frame["PreGapPct"] = None
+                frame["PreGapStatus"] = "outside_premarket_window"
+                frame["PreMarketPrice"] = None
+                frame["PreMarketQuoteTimeET"] = None
+                frame["PreGapReferencePrice"] = None
+                frame["PreGapReferenceDate"] = None
+                frame["PreGapReferenceBasis"] = ""
+                frame["Status"] = restore
             print("  ⚠️  盤前抓取跨越開盤，整批 PreGap 作廢以避免混合時點")
         else:
-            gap_available = int((df_all["PreGapStatus"] == "available").sum())
+            counts = df_all["PreGapStatus"].value_counts().to_dict()
+            gap_available = int(counts.get("available", 0))
             print(f"  📐 盤前跳空覆蓋:{gap_available}/{len(df_all)} "
-                  f"({gap_available / len(df_all):.1%})")
+                  f"({gap_available / len(df_all):.1%})  明細 {counts}")
     elif Config.PREMARKET_GAP_ENABLED and len(df_all) > 0:
         print(f"\n⏭️  {entry_timing['scan_session']} 補跑:"
               "不抓盤前跳空，PreGapStatus 已標記")
@@ -606,6 +667,22 @@ def run_scanner():
         timing=entry_timing,
         snapshot_as_of_et=snapshot_finalized_et.isoformat(),
     )
+
+    # V1.3.2:訊號棒不是預期的最後完整交易日 → plan 降為 data_stale。
+    # 分數、腿別與 Top 10 一律不動(那是下一版引擎的選股變更)。
+    sealed_bar_date = (
+        entry_timing.get("last_complete_session_date") or expected_bar_date
+    )
+    df_all, stale_n = demote_stale_bar_plans(
+        df_all, expected_bar_date=sealed_bar_date
+    )
+    df_go, _ = demote_stale_bar_plans(
+        df_go, expected_bar_date=sealed_bar_date
+    )
+    if stale_n:
+        stale_rows = df_all[df_all["TradePlanStatus"].astype(str) == "data_stale"]
+        print(f"  ⚠️  {stale_n} 檔訊號棒非 {sealed_bar_date},plan 降為 data_stale"
+              f"(不進 shadow R):{list(stale_rows['Ticker'])[:8]}")
 
     # ========== 決策摘要(前移供 Notion 大盤燈號用 — 原 V13.9.3) ==========
     decision = {}

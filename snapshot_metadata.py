@@ -62,6 +62,41 @@ def finalize_snapshot_timing(
     return out
 
 
+def demote_stale_bar_plans(
+    frame: pd.DataFrame,
+    *,
+    expected_bar_date: str | None,
+) -> tuple[pd.DataFrame, int]:
+    """Keep stale-bar rows in the snapshot but bar them from shadow measurement.
+
+    A row whose signal bar is not the expected last complete session describes a
+    different day than every other row, so its plan must never accumulate R.
+    Scores, legs and Top-10 membership are deliberately left untouched — full
+    ranking exclusion is a selection change and belongs to the next engine
+    version, not to this measurement-only slice.
+    """
+    if frame is None or frame.empty or "DataBarDate" not in frame:
+        return (pd.DataFrame() if frame is None else frame.copy()), 0
+
+    out = frame.copy()
+    if not expected_bar_date:
+        stale = pd.Series(True, index=out.index)
+    else:
+        stale = out["DataBarDate"].astype(str).ne(str(expected_bar_date))
+    demote = stale & out["TradePlanStatus"].astype(str).isin(
+        {"shadow_ready", "timing_unavailable"}
+    )
+    out.loc[demote, "TradePlanStatus"] = "data_stale"
+    if "PlanReason" in out and demote.any():
+        reason = out.loc[demote, "PlanReason"].astype(str)
+        suffix = ";signal_bar_not_last_complete_session"
+        out.loc[demote, "PlanReason"] = reason.where(
+            reason.str.contains(suffix.lstrip(";"), regex=False),
+            reason + suffix,
+        )
+    return out, int(demote.sum())
+
+
 def finalize_theme_metadata(
     frame: pd.DataFrame,
     *,

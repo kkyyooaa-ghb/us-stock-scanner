@@ -127,10 +127,17 @@ def analyze_market_open(mis_data: dict) -> dict:
     依 SPY 盤前 gap 判定開盤情境。
     參數:mis_data = get_market_premarket() 回傳(gap_pct 為百分比形式,-0.74 = -0.74%)
     回傳:scenario / tag / advice / gap_pct(沿用台股鍵名,L2 與 TG 共用)
+
+    V1.3.2 fail-closed:gap 必須在現行定義下有效(ok=True 且 gap_pct 有值)。
+    參考棒過期、報價過期或非盤前時段一律回 unknown、不給進場建議 ——
+    錯基準的 gap 只差一個交易日,就足以讓 ±1% 的 HUGE 門檻誤判方向。
     """
     try:
-        if not mis_data or not mis_data.get("ok"):
-            return {"scenario": "unknown", "tag": "", "advice": "", "gap_pct": 0}
+        if (not mis_data
+                or not mis_data.get("ok")
+                or mis_data.get("gap_pct") is None):
+            return {"scenario": "unknown", "tag": "", "advice": "", "gap_pct": None,
+                    "reason": (mis_data or {}).get("status", "no_market_reference")}
 
         gap_pct = float(mis_data.get("gap_pct", 0.0))   # 百分比形式
 
@@ -329,43 +336,51 @@ def generate_decision_summary(macro: dict, market_open: dict, df_go,
         reasons_l2 = []
         red_l2 = False
         green_l2 = True
+        # V1.3.2:大盤基準不可用 → fail-closed,不給任何進場建議。
+        # 維持 🟡 而非 ⚪,因為 FINAL 會把 ⚪ 排除、反而可能讓結論變綠燈。
+        reference_unavailable = scenario in ('unknown', 'error', '')
 
-        if scenario in ('huge_gap_up', 'panic'):
-            red_l2 = True
-            green_l2 = False
-            reasons_l2.append(market_tag.replace('🚫 ', ''))
-        elif scenario == 'minor_dip':
-            green_l2 = False
-            reasons_l2.append("盤前小跌測試")
-        elif scenario == 'normal':
-            reasons_l2.append("盤前平穩")
-        elif scenario == 'mild_gap_up':
-            reasons_l2.append("盤前溫和開高")
-        elif scenario in ('unknown', 'error', ''):
-            green_l2 = False
-            reasons_l2.append("盤前資料缺")
-
-        # 小型股位階納入 L2(原 P2 規則一字未改:綠→黃,黃維持,紅維持)
-        otc_weak = False
-        if otc and otc.get('ok'):
-            otc_dist_pct = otc.get('dist_ma_pct', 0.0)
-            if otc_dist_pct < Config.OTC_WEAKNESS_THRESHOLD:
-                otc_weak = True
-                reasons_l2.append(f"小型股偏弱 {otc_dist_pct:+.1%}")
-
-        if red_l2:
-            l2_light = "🔴"
-            l2_advice = "時機不佳,觀望"
-        elif green_l2:
-            if otc_weak:
-                l2_light = "🟡"
-                l2_advice = "大盤撐盤但小型股偏弱,部位縮半"
-            else:
-                l2_light = "🟢"
-                l2_advice = "時機 OK,可執行"
+        if reference_unavailable:
+            l2_light  = "🟡"
+            l2_advice = "大盤基準不可用,本輪不提供進場建議"
+            reasons_l2.append(
+                "SPY 盤前基準不可用"
+                f"({market_open.get('reason', 'no_market_reference')})"
+            )
         else:
-            l2_light = "🟡"
-            l2_advice = "時機勉強,部位縮半"
+            if scenario in ('huge_gap_up', 'panic'):
+                red_l2 = True
+                green_l2 = False
+                reasons_l2.append(market_tag.replace('🚫 ', ''))
+            elif scenario == 'minor_dip':
+                green_l2 = False
+                reasons_l2.append("盤前小跌測試")
+            elif scenario == 'normal':
+                reasons_l2.append("盤前平穩")
+            elif scenario == 'mild_gap_up':
+                reasons_l2.append("盤前溫和開高")
+
+            # 小型股位階納入 L2(原 P2 規則一字未改:綠→黃,黃維持,紅維持)
+            otc_weak = False
+            if otc and otc.get('ok'):
+                otc_dist_pct = otc.get('dist_ma_pct', 0.0)
+                if otc_dist_pct < Config.OTC_WEAKNESS_THRESHOLD:
+                    otc_weak = True
+                    reasons_l2.append(f"小型股偏弱 {otc_dist_pct:+.1%}")
+
+            if red_l2:
+                l2_light = "🔴"
+                l2_advice = "時機不佳,觀望"
+            elif green_l2:
+                if otc_weak:
+                    l2_light = "🟡"
+                    l2_advice = "大盤撐盤但小型股偏弱,部位縮半"
+                else:
+                    l2_light = "🟢"
+                    l2_advice = "時機 OK,可執行"
+            else:
+                l2_light = "🟡"
+                l2_advice = "時機勉強,部位縮半"
 
         summary['L2'] = {
             'light':  l2_light,

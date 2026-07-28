@@ -163,7 +163,16 @@ def _build_properties(row: Dict[str, Any],
     _set_number(props, "停損價",     row.get("StopLoss"))
     _set_number(props, "季營收YoY",  row.get("YoY"))          # 原月營收YoY 欄
     _set_number(props, "連買天數",   row.get("ConsecDays"))
-    _set_number(props, "盤前跳空%",  row.get("PreGapPct"))    # D7 新訊號(None 留空)
+
+    # V1.3.2:Notion 沒有欄位可以承載 PreGapDefinitionVersion,所以只寫在現行
+    # 定義下有效的 gap。舊的 v0 值(分母誤用 Close[-2])不可能再被區分出來,
+    # 寧可留空 —— 週報端的跳空分層也已一併停用。
+    pre_gap_valid = (
+        row.get("PreGapStatus") == "available"
+        and row.get("PreGapDefinitionVersion") == Config.PREGAP_DEFINITION_VERSION
+    )
+    if pre_gap_valid:
+        _set_number(props, "盤前跳空%", row.get("PreGapPct"))
 
     dist_tag = row.get("DistTag")
     if dist_tag:

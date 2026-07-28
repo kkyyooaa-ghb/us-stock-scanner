@@ -61,6 +61,12 @@ SNAPSHOT_COLUMNS = (
     "YoY",
     "PreGapPct",
     "PreGapStatus",
+    "PreMarketPrice",
+    "PreMarketQuoteTimeET",
+    "PreGapReferencePrice",
+    "PreGapReferenceDate",
+    "PreGapReferenceBasis",
+    "PreGapDefinitionVersion",
     "SignalEngineVersion",
     "MeasurementVersion",
     "GitCommitSha",
@@ -316,6 +322,8 @@ def canonicalize_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
         allowed_gap_statuses = {
             "available",
             "no_premarket_trade",
+            "stale_quote",        # V1.3.2:preMarketTime 不在今日盤前窗
+            "stale_reference",    # V1.3.2:訊號棒非預期最後完整交易日
             "fetch_error",
             "outside_premarket_window",
             "disabled",
@@ -345,10 +353,34 @@ def canonicalize_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
             & gap_pct[data_mask].isna()
         ).any():
             raise ValueError("available PreGapStatus requires PreGapPct")
+        # V1.3.2:有 gap 就必須帶得走它的分母與定義版本,否則日後無從判斷可信度
+        if gap_status.eq("available").any():
+            available_mask = data_mask & source["PreGapStatus"].astype(str).eq(
+                "available"
+            )
+            for column in (
+                "PreGapReferencePrice",
+                "PreGapReferenceDate",
+                "PreGapReferenceBasis",
+                "PreGapDefinitionVersion",
+            ):
+                if column not in source.columns:
+                    raise ValueError(f"available PreGapStatus requires {column}")
+                if _blank(source.loc[available_mask, column]).any():
+                    raise ValueError(f"available PreGapStatus requires {column}")
+            if not source.loc[
+                available_mask, "PreGapDefinitionVersion"
+            ].astype(str).eq(Config.PREGAP_DEFINITION_VERSION).all():
+                raise ValueError("PreGapDefinitionVersion mismatch")
+            _strict_dates(
+                source.loc[available_mask, "PreGapReferenceDate"],
+                label="PreGapReferenceDate",
+            )
 
         allowed_plan_statuses = {
             "shadow_ready",
             "timing_unavailable",
+            "data_stale",         # V1.3.2:訊號棒過期,保留列但禁止進 shadow R
             "not_applicable",
             "vetoed",
         }
@@ -368,7 +400,7 @@ def canonicalize_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
         selected_plan_mask = (
             data_mask
             & source["TradePlanStatus"].astype(str).isin(
-                {"shadow_ready", "timing_unavailable"}
+                {"shadow_ready", "timing_unavailable", "data_stale"}
             )
         )
         if selected_plan_mask.any():

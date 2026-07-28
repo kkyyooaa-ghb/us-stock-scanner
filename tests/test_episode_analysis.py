@@ -25,6 +25,8 @@ def _row(
         "TradePlanVersion": Config.TRADE_PLAN_VERSION,
         "PlanMeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
         "V13MeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
+        "SignalEngineVersion": Config.SIGNAL_ENGINE_VERSION,
+        "ConfigHash": "cohort-hash",
         "PlanSelectedLeg": leg,
         "SelectedLeg": leg,
         "OrderType": order_type,

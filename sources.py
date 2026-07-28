@@ -51,6 +51,10 @@ except Exception:                      # 極端環境 fallback:固定 EDT(-4)
 
 TPE_TZ = timezone(timedelta(hours=8))  # 台北(TG 推播顯示用)
 
+# 盤前跳空分母的來源說明(寫進快照,讓日後可重新檢視這個選擇)。
+# 個股池與 SPY/QQQ 都用 auto_adjust=True 的日線,與 TradePlan 同基準。
+PREGAP_REFERENCE_BASIS = "signal_bar_close_auto_adjusted"
+
 
 # ==========================================================================
 # 時間工具
@@ -597,75 +601,199 @@ def get_futures_macro() -> dict:
 # ==========================================================================
 # 盤前報價(2026-06-09 實測:盤前「價」可靠、盤前「量」不可靠)
 # ==========================================================================
-def get_premarket_quote(ticker: str) -> dict:
+def _premarket_result(status: str, **fields) -> dict:
+    """Uniform premarket payload; a gap only exists when status is available."""
+    payload = {
+        "ok":                False,
+        "status":            status,
+        "price":             None,
+        "quote_time_et":     None,
+        "reference_price":   None,
+        "reference_date":    None,
+        "reference_basis":   "",
+        "gap":               None,
+        "gap_pct":           None,
+        "definition_version": Config.PREGAP_DEFINITION_VERSION,
+        "session":           "",
+        "src":               "",
+        "err":               "",
+    }
+    payload.update(fields)
+    payload["ok"] = status == "available"
+    return payload
+
+
+def get_premarket_quote(ticker: str, *,
+                        reference_close=None,
+                        reference_date: str = None,
+                        expected_bar_date: str = None,
+                        now_et: datetime = None) -> dict:
     """
-    個股盤前跳空(D7 新訊號)。
-    回傳:ok / price / prev_close / gap / gap_pct / session / src
-    非盤前時段:session='regular_or_closed',price 為最近成交價(仍可算 gap)。
+    個股盤前跳空(D7 訊號;V1.3.2 量尺)。
+
+    分母契約(V1.3.2):使用呼叫端傳入、且經日期驗證的「訊號棒收盤」,與
+    TradePlan 同源。**絕不**使用 Yahoo 的 regularMarketPreviousClose —— 該
+    欄位在盤前時段等於 Close[-2](實測 2026-07-28:回傳 7/24 而非 7/27),
+    會把前一個交易日的漲跌幅整個灌進「跳空」,實測 corr=0.955。
+
+    status:
+      available            gap 有效
+      no_premarket_trade   無盤前成交(合法情況)
+      stale_quote          preMarketTime 不在今日盤前窗內(Yahoo 快取舊價)
+      stale_reference      訊號棒日期 != 預期最後完整交易日,或參考價缺漏
+      outside_premarket_window / fetch_error
+    """
+    if not HAS_YF:
+        return _premarket_result("fetch_error", err="yfinance 未安裝")
+
+    now = (now_et or datetime.now(ET_TZ)).astimezone(ET_TZ)
+    if not is_premarket_quote_window(now):
+        return _premarket_result("outside_premarket_window")
+
+    # 參考價先驗:分母不合格就不該去打 API,也絕不退回 Yahoo 的前收
+    ref_ok = False
+    try:
+        ref_price = float(reference_close) if reference_close is not None else 0.0
+        ref_ok = (
+            ref_price > 0
+            and bool(reference_date)
+            and bool(expected_bar_date)
+            and str(reference_date) == str(expected_bar_date)
+        )
+    except (TypeError, ValueError):
+        ref_price = 0.0
+    if not ref_ok:
+        return _premarket_result(
+            "stale_reference",
+            reference_price=reference_close,
+            reference_date=reference_date,
+            err=f"{ticker} 參考棒 {reference_date} != 預期 {expected_bar_date}",
+        )
+
+    try:
+        info = yf.Ticker(ticker).info or {}
+    except Exception as e:
+        return _premarket_result("fetch_error", err=f"{ticker} info 失敗:{e}")
+
+    pm = info.get("preMarketPrice")
+    if not pm:
+        return _premarket_result(
+            "no_premarket_trade",
+            reference_price=ref_price,
+            reference_date=reference_date,
+            reference_basis=PREGAP_REFERENCE_BASIS,
+        )
+
+    # 報價新鮮度:preMarketTime 必須落在「今日」盤前窗內,否則視為快取舊價
+    quote_time_et = None
+    try:
+        raw_time = info.get("preMarketTime")
+        if raw_time is not None:
+            quote_dt = datetime.fromtimestamp(
+                float(raw_time), tz=timezone.utc
+            ).astimezone(ET_TZ)
+            quote_time_et = quote_dt.isoformat()
+            fresh = (
+                quote_dt.date() == now.date()
+                and is_premarket_quote_window(quote_dt)
+            )
+        else:
+            fresh = False
+    except Exception:
+        fresh = False
+    if not fresh:
+        return _premarket_result(
+            "stale_quote",
+            price=float(pm),
+            quote_time_et=quote_time_et,
+            reference_price=ref_price,
+            reference_date=reference_date,
+            reference_basis=PREGAP_REFERENCE_BASIS,
+            src="preMarketPrice",
+            err=f"{ticker} preMarketTime={quote_time_et} 不在今日盤前窗",
+        )
+
+    price = float(pm)
+    gap = round(price - ref_price, 4)
+    # 分母原值寫回快照(不四捨五入),讓 gap_pct 可以逐筆重算對帳
+    return _premarket_result(
+        "available",
+        price=price,
+        quote_time_et=quote_time_et,
+        reference_price=ref_price,
+        reference_date=reference_date,
+        reference_basis=PREGAP_REFERENCE_BASIS,
+        gap=gap,
+        gap_pct=round(gap / ref_price * 100, 2),
+        session="premarket",
+        src="preMarketPrice",
+    )
+
+
+def get_reference_close(ticker: str, *, expected_bar_date: str,
+                        period: str = "15d") -> dict:
+    """
+    盤前跳空分母:指數 ETF 的訊號棒(最後一根完整日 K)收盤 + 其實際日期。
+
+    與個股池同基準(auto_adjust=True),讓 SPY/QQQ 與個股的 gap 定義一致;
+    日期不符時回 ok=False,由呼叫端 fail-closed,絕不猜。
     """
     if not HAS_YF:
         return {"ok": False, "err": "yfinance 未安裝"}
     try:
-        tk = yf.Ticker(ticker)
-        price, src = None, ""
-        prev_close = None
-
-        # 路徑 1:info 的 preMarketPrice(實測可靠)
-        try:
-            info = tk.info or {}
-            pm = info.get("preMarketPrice")
-            prev_close = info.get("regularMarketPreviousClose") \
-                or info.get("previousClose")
-            if pm:
-                price, src = float(pm), "preMarketPrice"
-        except Exception:
-            info = {}
-
-        # 路徑 2:fast_info fallback(取最近成交價)
-        if price is None:
-            try:
-                fi = tk.fast_info
-                price = float(getattr(fi, "last_price", None) or 0) or None
-                if prev_close is None:
-                    prev_close = float(getattr(fi, "previous_close", None) or 0) or None
-                if price is not None:
-                    src = "fast_info.last_price"
-            except Exception:
-                pass
-
-        if price is None or not prev_close:
-            return {"ok": False, "err": f"{ticker} 盤前/最近價缺漏"}
-
-        prev_close = float(prev_close)
-        gap = round(price - prev_close, 4)
-        gap_pct = round(gap / prev_close * 100, 2)
-
-        now_et = datetime.now(ET_TZ)
-        in_pre = (4 <= now_et.hour < 9) or (now_et.hour == 9 and now_et.minute < 30)
-        session = "premarket" if (in_pre and src == "preMarketPrice") \
-            else "regular_or_closed"
-
-        return {"ok": True, "price": float(price), "prev_close": prev_close,
-                "gap": gap, "gap_pct": gap_pct, "session": session, "src": src}
+        d = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+        close = yf_close_series(d).dropna()
+        if close.empty:
+            return {"ok": False, "err": f"{ticker} 無日線"}
+        eligible = close[
+            [ts.strftime("%Y-%m-%d") <= str(expected_bar_date)
+             for ts in close.index]
+        ]
+        if eligible.empty:
+            return {"ok": False, "err": f"{ticker} 無 <= {expected_bar_date} 的日線"}
+        bar_date = eligible.index[-1].strftime("%Y-%m-%d")
+        return {
+            "ok":       bar_date == str(expected_bar_date),
+            "close":    float(eligible.iloc[-1]),
+            "bar_date": bar_date,
+            "err":      "" if bar_date == str(expected_bar_date)
+                        else f"{ticker} 最後完整日 K {bar_date} != {expected_bar_date}",
+        }
     except Exception as e:
-        return {"ok": False, "err": f"{ticker} 盤前報價失敗:{e}"}
+        return {"ok": False, "err": f"{ticker} 參考收盤失敗:{e}"}
 
 
-def get_market_premarket() -> dict:
+def get_market_premarket(*, reference_close=None, reference_date: str = None,
+                         expected_bar_date: str = None,
+                         now_et: datetime = None) -> dict:
     """
-    大盤盤前狀態(原 get_twse_mis 位):SPY 盤前價 vs 前收。
-    回傳鍵與台股版完全一致:ok / price / prev_close / gap / gap_pct / trade_time
+    大盤盤前狀態(原 get_twse_mis 位):SPY 盤前價 vs 訊號棒收盤。
+
+    ⚠️ ok=True 僅代表「gap 在 V1.3.2 定義下有效」。參考棒或報價不合格時回
+    ok=False,讓 analyze_market_open 直接 fail-closed 為 unknown —— 大盤燈號
+    寧可留白,也不可用錯基準的 gap 給進場建議。
     """
-    q = get_premarket_quote(Config.MARKET_PROXY_ETF)
-    if not q.get("ok"):
-        return {"ok": False, "err": q.get("err", "SPY 盤前報價失敗")}
+    q = get_premarket_quote(
+        Config.MARKET_PROXY_ETF,
+        reference_close=reference_close,
+        reference_date=reference_date,
+        expected_bar_date=expected_bar_date,
+        now_et=now_et,
+    )
     return {
-        "ok":         True,
-        "price":      q["price"],
-        "prev_close": q["prev_close"],
-        "gap":        q["gap"],
-        "gap_pct":    q["gap_pct"],
-        "trade_time": get_et_time() + f" ET({q['session']})",
+        "ok":                 q["ok"],
+        "status":             q["status"],
+        "price":              q["price"],
+        "prev_close":         q["reference_price"],
+        "reference_price":    q["reference_price"],
+        "reference_date":     q["reference_date"],
+        "reference_basis":    q["reference_basis"],
+        "quote_time_et":      q["quote_time_et"],
+        "gap":                q["gap"],
+        "gap_pct":            q["gap_pct"],
+        "definition_version": q["definition_version"],
+        "trade_time":         get_et_time() + f" ET({q['status']})",
+        "err":                q["err"],
     }
 
 
