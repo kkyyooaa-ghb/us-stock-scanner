@@ -154,6 +154,64 @@ class MarketLightFailClosedTests(unittest.TestCase):
         )
 
 
+class FinalSeverityOrderTests(unittest.TestCase):
+    """FINAL 的順序即嚴重度:紅燈的減倉指示不得被 fail-closed 降級。
+
+    紅燈同時禁止進場「並」指示減倉,是比「基準不可用」更強的警告;
+    若基準不可用先判,VIX 42 的紅燈會被降成黃燈,保護本金的指示就消失。
+    """
+
+    PICKS = pd.DataFrame([{"Ticker": "AAA", "DistTag": "🎯 甜點價"}])
+
+    def _summary(self, *, red_macro, reference_available):
+        macro = (
+            {"bias": "bear", "vix_level": 42}
+            if red_macro
+            else {"bias": "bull", "vix_level": 12}
+        )
+        market_open = (
+            {"scenario": "normal", "tag": "✅ 正常進場", "gap_pct": -0.1}
+            if reference_available
+            else {"scenario": "unknown", "tag": "", "reason": "stale_reference"}
+        )
+        trend = "bear" if red_macro else "bull"
+        with mock.patch(
+            "sources.get_index_trend",
+            return_value={"ok": True, "trend": trend, "reason": trend},
+        ):
+            return generate_decision_summary(
+                macro, market_open, self.PICKS, otc={"ok": False}
+            )
+
+    def test_red_light_survives_unavailable_reference(self):
+        summary = self._summary(red_macro=True, reference_available=False)
+        self.assertEqual("🔴", summary["L1"]["light"])
+        self.assertFalse(summary["L2"]["reference_available"])
+        self.assertEqual("🔴", summary["FINAL"]["light"])
+        self.assertIn("減倉", summary["FINAL"]["advice"])
+
+    def test_red_light_still_wins_when_reference_is_available(self):
+        summary = self._summary(red_macro=True, reference_available=True)
+        self.assertEqual("🔴", summary["FINAL"]["light"])
+        self.assertIn("減倉", summary["FINAL"]["advice"])
+
+    def test_unavailable_reference_without_red_blocks_new_entries(self):
+        summary = self._summary(red_macro=False, reference_available=False)
+        self.assertNotIn("🔴", [summary[k]["light"] for k in ("L1", "L2", "L3")])
+        self.assertEqual("🟡", summary["FINAL"]["light"])
+        self.assertEqual(
+            "大盤基準不可用，本輪不提供進場建議",
+            summary["FINAL"]["advice"],
+        )
+        self.assertNotIn("減量 50%", summary["FINAL"]["advice"])
+
+    def test_available_reference_without_red_keeps_normal_wording(self):
+        summary = self._summary(red_macro=False, reference_available=True)
+        self.assertTrue(summary["L2"]["reference_available"])
+        self.assertIn(summary["FINAL"]["light"], ("🟢", "🟡"))
+        self.assertNotIn("基準不可用", summary["FINAL"]["advice"])
+
+
 class StaleBarPlanTests(unittest.TestCase):
     def _frame(self, bar_dates, status="shadow_ready"):
         return pd.DataFrame([

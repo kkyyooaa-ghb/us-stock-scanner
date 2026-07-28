@@ -442,14 +442,16 @@ def generate_decision_summary(macro: dict, market_open: dict, df_go,
 
     # ========== FINAL ==========
     lights = [summary[k]['light'] for k in ('L1', 'L2', 'L3') if summary[k]['light'] != '⚪']
-    # SPY 基準不可用時，L2 本身雖是黃燈，若沿用一般黃燈文案仍會輸出
-    # 「減量 50% 操作」，與 fail-closed 自相矛盾。此狀態優先覆寫 FINAL。
-    if not summary.get('L2', {}).get('reference_available', False):
-        final_light = '🟡'
-        final_advice = '大盤基準不可用，本輪不提供進場建議'
-    elif '🔴' in lights:
+    # 順序即嚴重度。紅燈必須先判:它除了禁止進場,還指示減倉,是比
+    # 「基準不可用」更強的警告 —— fail-closed 不該把更強的警告降級。
+    # 其次才是 SPY 基準不可用:此時沿用一般黃燈文案會輸出「減量 50% 操作」,
+    # 與 fail-closed 自相矛盾,故改為明確禁止新進場。
+    if '🔴' in lights:
         final_light = '🔴'
         final_advice = '今天休息 / 減倉 — 有紅燈,保護本金優先'
+    elif not summary.get('L2', {}).get('reference_available', False):
+        final_light = '🟡'
+        final_advice = '大盤基準不可用，本輪不提供進場建議'
     elif '🟡' in lights:
         final_light = '🟡'
         final_advice = '減量 50% 操作 — 訊號不齊,留彈藥'
