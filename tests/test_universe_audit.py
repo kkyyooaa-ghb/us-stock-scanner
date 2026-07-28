@@ -18,6 +18,7 @@ from snapshot_schema import (
     canonicalize_snapshot,
     snapshot_data_rows,
 )
+from universe_eligibility import complete_session_dollar_volume
 
 
 def _data_row(ticker="AAA", expected=2, **overrides):
@@ -133,6 +134,45 @@ class UniverseReconciliationTests(unittest.TestCase):
                 ])
                 self.assertEqual(2, len(canonicalize_snapshot(frame)))
 
+    def test_download_failure_must_be_counted_as_missing(self):
+        frame = pd.DataFrame([
+            _data_row(),
+            _audit_row(
+                reason="download_missing",
+                UniverseDisposition="excluded",
+            ),
+        ])
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not match UniverseExclusionReason",
+        ):
+            canonicalize_snapshot(frame)
+
+    def test_non_download_failure_must_be_counted_as_excluded(self):
+        frame = pd.DataFrame([
+            _data_row(),
+            _audit_row(
+                reason="stale_bar",
+                UniverseDisposition="missing",
+            ),
+        ])
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not match UniverseExclusionReason",
+        ):
+            canonicalize_snapshot(frame)
+
+    def test_expected_count_must_be_an_integer(self):
+        frame = pd.DataFrame([
+            _data_row(expected=2.5),
+            _audit_row(expected=2.5),
+        ])
+
+        with self.assertRaisesRegex(ValueError, "finite integer"):
+            canonicalize_snapshot(frame)
+
     def test_data_row_cannot_claim_to_be_excluded(self):
         frame = pd.DataFrame([
             _data_row(UniverseDisposition="excluded"), _audit_row(),
@@ -177,10 +217,57 @@ class LiquidityRuleTests(unittest.TestCase):
         """選中位數而非均值的理由:財報日單日暴量不該讓一檔通過門檻。"""
         close = pd.Series([10.0] * 20)
         volume = pd.Series([100_000] * 19 + [40_000_000])
-        dollar = close * volume
+        result = complete_session_dollar_volume(
+            close,
+            volume,
+            lookback_days=Config.LIQUIDITY_LOOKBACK_DAYS,
+            statistic=Config.LIQUIDITY_STATISTIC,
+        )
 
-        self.assertLess(float(dollar.median()), Config.MIN_DOLLAR_VOLUME_USD)
-        self.assertGreater(float(dollar.mean()), Config.MIN_DOLLAR_VOLUME_USD)
+        self.assertLess(result, Config.MIN_DOLLAR_VOLUME_USD)
+        self.assertGreater(float((close * volume).mean()),
+                           Config.MIN_DOLLAR_VOLUME_USD)
+
+    def test_partial_volume_window_is_not_eligible(self):
+        dates = pd.date_range("2026-06-01", periods=20, freq="B")
+        close = pd.Series([100.0] * 20, index=dates)
+        volume = pd.Series([1_000_000.0] * 5, index=dates[-5:])
+
+        result = complete_session_dollar_volume(
+            close,
+            volume,
+            lookback_days=Config.LIQUIDITY_LOOKBACK_DAYS,
+            statistic=Config.LIQUIDITY_STATISTIC,
+        )
+
+        self.assertIsNone(result)
+
+    def test_misaligned_volume_window_is_not_eligible(self):
+        dates = pd.date_range("2026-06-01", periods=21, freq="B")
+        close = pd.Series([100.0] * 20, index=dates[-20:])
+        volume = pd.Series([1_000_000.0] * 20, index=dates[:-1])
+
+        result = complete_session_dollar_volume(
+            close,
+            volume,
+            lookback_days=Config.LIQUIDITY_LOOKBACK_DAYS,
+            statistic=Config.LIQUIDITY_STATISTIC,
+        )
+
+        self.assertIsNone(result)
+
+    def test_data_row_requires_finite_eligible_dollar_volume(self):
+        for value in (float("nan"), 19_999_999.0):
+            with self.subTest(value=value):
+                frame = pd.DataFrame([
+                    _data_row(DollarVolumeMedian20=value),
+                    _audit_row(),
+                ])
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "DollarVolumeMedian20",
+                ):
+                    canonicalize_snapshot(frame)
 
 
 if __name__ == "__main__":

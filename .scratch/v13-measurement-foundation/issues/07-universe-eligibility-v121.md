@@ -68,3 +68,15 @@ $5M～$50M 全部排除 0 檔,$100M 才開始排除 FER。因此 $20M 是**執�
 - SPY／QQQ 盤前共用 helper、盤前報價 value object:重構債,沿用自 06。
 - `demote_stale_bar_plans` 在 freshness 於選股層生效後成為第二道防線,
   保留作為 defense in depth。
+
+## Post-review hardening
+
+- 流動性統計改由獨立純函式計算：以最近 20 根 Close 的日期為準，20 天
+  每一天都必須有有限且為正的 Close 與 Volume；不足、錯位或 NaN 一律
+  `insufficient_history`，不再讓 pandas 跳過缺值後用短視窗誤判合格。
+- schema 反向驗證每筆 data 的 `DollarVolumeMedian20` 必須有限且達 $20M。
+- `download_missing` 只能記為 `missing`；其他五個原因碼只能記為
+  `excluded`，避免對帳數學正確但分類語意錯誤。
+- `UniverseExpectedCount` 必須是有限整數；掃描器與 Telegram 標題改由
+  `SignalEngineVersion` 動態產生，避免升版後仍顯示 V1.2.0。
+- 完整測試共 111 項通過（另 1 項依本機 XNYS 套件條件跳過）。

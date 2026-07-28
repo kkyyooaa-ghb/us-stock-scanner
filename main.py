@@ -69,6 +69,7 @@ from trade_plan import (
     strategy_config_hash,
     universe_version,
 )
+from universe_eligibility import complete_session_dollar_volume
 
 # LLM enrichment 獨立模組(失敗優雅,import 失敗不影響主流程 — 原 P7.5)
 try:
@@ -112,7 +113,8 @@ def _premarket_gap_note(gap_pct: float) -> str:
 def run_scanner():
     start_time = time.time()
     print(f"\n{'='*55}")
-    print(f"🚀 美股盤前掃描 V1.2.0-US  {get_et_time()} ET / {get_tw_time()} 台北")
+    print(f"🚀 美股盤前掃描 {Config.SIGNAL_ENGINE_VERSION.upper()}-US  "
+          f"{get_et_time()} ET / {get_tw_time()} 台北")
     print(f"{'='*55}\n")
 
     # ========== 交易日護欄(V1.1.1,P2)— 根治假日仍寫 Notion ==========
@@ -323,7 +325,7 @@ def run_scanner():
                 open_data = open_data.iloc[:-1] if len(open_data) > 0 else open_data
 
             # 需要 MA60 故要求至少 60 筆歷史資料
-            if len(hist) < Config.MA_LONG_PERIOD or len(vol) < 5:
+            if len(hist) < Config.MA_LONG_PERIOD:
                 _audit(ticker, 'insufficient_history')
                 continue
 
@@ -342,10 +344,15 @@ def run_scanner():
 
             # V1.2.1 流動性:20 個完整交易日的 median(Close x Volume)。
             # 取代舊的股數門檻 —— 股數與股價成反比,對高價股系統性失真。
-            dollar_median = float(
-                (hist.tail(Config.LIQUIDITY_LOOKBACK_DAYS)
-                 * vol.tail(Config.LIQUIDITY_LOOKBACK_DAYS)).median()
+            dollar_median = complete_session_dollar_volume(
+                hist,
+                vol,
+                lookback_days=Config.LIQUIDITY_LOOKBACK_DAYS,
+                statistic=Config.LIQUIDITY_STATISTIC,
             )
+            if dollar_median is None:
+                _audit(ticker, 'insufficient_history')
+                continue
             if dollar_median < Config.MIN_DOLLAR_VOLUME_USD:
                 _audit(ticker, 'liquidity_below_min', dollar_median=dollar_median)
                 continue
@@ -912,7 +919,8 @@ def run_scanner():
         stale_line = ("<i>⚠️ 非盤前排程時段執行,資料非當日盤前即時</i>\n\n")
 
     msg = (
-        f"<b>📊 美股盤前監控 V1.2.0-US  {get_tw_time()} 台北</b>\n"
+        f"<b>📊 美股盤前監控 {Config.SIGNAL_ENGINE_VERSION.upper()}-US  "
+        f"{get_tw_time()} 台北</b>\n"
         f"<i>{get_et_time()} ET</i>\n\n"
         f"{stale_line}"
         f"{macro_block}"

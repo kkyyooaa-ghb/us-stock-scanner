@@ -261,7 +261,10 @@ def canonicalize_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
         )
         if expected.isna().any() or expected.nunique() != 1:
             raise ValueError("UniverseExpectedCount must be one finite value")
-        expected_count = int(expected.iloc[0])
+        expected_value = float(expected.iloc[0])
+        if not math.isfinite(expected_value) or not expected_value.is_integer():
+            raise ValueError("UniverseExpectedCount must be one finite integer")
+        expected_count = int(expected_value)
 
         disposition = source.loc[universe_mask, "UniverseDisposition"].astype(str)
         invalid_dispositions = sorted(
@@ -304,6 +307,18 @@ def canonicalize_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
             raise ValueError(
                 "invalid UniverseExclusionReason:" + ",".join(invalid_reasons)
             )
+        audit_dispositions = source.loc[
+            audit_mask, "UniverseDisposition"
+        ].astype(str)
+        expected_dispositions = reasons.map(
+            lambda reason: "missing"
+            if reason == "download_missing"
+            else "excluded"
+        )
+        if not audit_dispositions.eq(expected_dispositions).all():
+            raise ValueError(
+                "UniverseDisposition does not match UniverseExclusionReason"
+            )
         # 無法評分的股票不得帶分數 —— 帶了就會被下游誤當普通標的彙總
         for column in ("Priority", "Score"):
             if column in source.columns:
@@ -324,6 +339,7 @@ def canonicalize_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
     if data_mask.any():
         required_data_columns = {
             "Ticker",
+            "DollarVolumeMedian20",
             "Priority",
             "Score",
             "SnapshotAsOfET",
@@ -351,6 +367,21 @@ def canonicalize_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
 
         if _blank(source.loc[data_mask, "Ticker"]).any():
             raise ValueError("data rows require Ticker")
+        dollar_volume = pd.to_numeric(
+            source.loc[data_mask, "DollarVolumeMedian20"],
+            errors="coerce",
+        )
+        if (
+            dollar_volume.isna().any()
+            or not dollar_volume.map(lambda value: math.isfinite(float(value))).all()
+        ):
+            raise ValueError(
+                "data rows require finite DollarVolumeMedian20"
+            )
+        if dollar_volume.lt(Config.MIN_DOLLAR_VOLUME_USD).any():
+            raise ValueError(
+                "data rows require eligible DollarVolumeMedian20"
+            )
         for score_column in ("Priority", "Score"):
             score_values = pd.to_numeric(
                 source.loc[data_mask, score_column],
