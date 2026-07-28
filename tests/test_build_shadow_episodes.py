@@ -7,6 +7,7 @@ import pandas as pd
 
 from build_shadow_episodes import main
 from config import Config
+from trade_plan import strategy_config_hash
 
 
 class EpisodeCliTests(unittest.TestCase):
@@ -24,7 +25,7 @@ class EpisodeCliTests(unittest.TestCase):
                 "PlanMeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
                 "V13MeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
                 "SignalEngineVersion": Config.SIGNAL_ENGINE_VERSION,
-                "ConfigHash": "cohort-hash",
+                "ConfigHash": strategy_config_hash(),
                 "PlanSelectedLeg": "consolidation_dip",
                 "OrderType": "buy_limit_zone",
                 "V13MeasurementStatus": "completed",

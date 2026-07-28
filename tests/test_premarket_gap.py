@@ -6,13 +6,13 @@ Close[-2] 而非 Close[-1],用它當分母等於把前一個交易日的漲跌�
 「極端跳空 ≥5%」。本檔把這個定義釘死。
 """
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
 
 import pandas as pd
 
 import sources
-from analyzers import analyze_market_open
+from analyzers import analyze_market_open, generate_decision_summary
 from config import Config
 from snapshot_metadata import demote_stale_bar_plans
 
@@ -79,6 +79,20 @@ class PremarketGapDenominatorTests(unittest.TestCase):
         self.assertEqual("stale_quote", result["status"])
         self.assertIsNone(result["gap_pct"])
 
+    def test_quote_older_than_max_age_is_not_trusted(self):
+        old_quote = PREMARKET_NOW - timedelta(
+            minutes=Config.PREMARKET_QUOTE_MAX_AGE_MINUTES + 1
+        )
+        result = _quote(_info(102.0, quote_time_et=old_quote))
+        self.assertEqual("stale_quote", result["status"])
+        self.assertIsNone(result["gap_pct"])
+
+    def test_future_quote_time_is_not_trusted(self):
+        future_quote = PREMARKET_NOW + timedelta(minutes=1)
+        result = _quote(_info(102.0, quote_time_et=future_quote))
+        self.assertEqual("stale_quote", result["status"])
+        self.assertIsNone(result["gap_pct"])
+
     def test_no_premarket_trade_is_legal_and_not_an_error(self):
         result = _quote(_info(None, quote_time_et=PREMARKET_NOW))
         self.assertEqual("no_premarket_trade", result["status"])
@@ -109,6 +123,35 @@ class MarketLightFailClosedTests(unittest.TestCase):
     def test_valid_reference_still_classifies_normally(self):
         out = analyze_market_open({"ok": True, "gap_pct": -0.1})
         self.assertEqual("normal", out["scenario"])
+
+    def test_invalid_reference_overrides_final_actionable_advice(self):
+        picks = pd.DataFrame([
+            {"Ticker": "AAA", "DistTag": "🎯 甜點價"},
+            {"Ticker": "BBB", "DistTag": "🎯 甜點價"},
+        ])
+        macro = {"bias": "bull", "vix_level": 12}
+        market_open = {
+            "scenario": "unknown",
+            "tag": "",
+            "reason": "stale_reference",
+        }
+        with mock.patch(
+            "sources.get_index_trend",
+            return_value={"ok": True, "trend": "bull", "reason": "多頭"},
+        ):
+            summary = generate_decision_summary(
+                macro,
+                market_open,
+                picks,
+                otc={"ok": False},
+            )
+
+        self.assertFalse(summary["L2"]["reference_available"])
+        self.assertEqual("🟡", summary["FINAL"]["light"])
+        self.assertEqual(
+            "大盤基準不可用，本輪不提供進場建議",
+            summary["FINAL"]["advice"],
+        )
 
 
 class StaleBarPlanTests(unittest.TestCase):

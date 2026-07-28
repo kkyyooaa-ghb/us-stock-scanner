@@ -4,6 +4,7 @@ import pandas as pd
 
 from config import Config
 from episode_analysis import build_episode_analysis
+from trade_plan import strategy_config_hash
 
 
 def _row(
@@ -26,7 +27,7 @@ def _row(
         "PlanMeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
         "V13MeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
         "SignalEngineVersion": Config.SIGNAL_ENGINE_VERSION,
-        "ConfigHash": "cohort-hash",
+        "ConfigHash": strategy_config_hash(),
         "PlanSelectedLeg": leg,
         "SelectedLeg": leg,
         "OrderType": order_type,
@@ -287,6 +288,43 @@ class EpisodeKpiTests(unittest.TestCase):
         self.assertEqual(1, analysis.summary["overall"]["completed_r"])
         self.assertFalse(
             analysis.summary["maturity"]["parameter_tuning_allowed"]
+        )
+
+    def test_missing_or_other_config_hash_cannot_enter_current_cohort(self):
+        current = _row(
+            "2026-01-05",
+            "CURRENT",
+            "completed",
+            lifecycle_end="2026-01-05",
+            filled=True,
+            r_lower=0.25,
+            r_upper=0.25,
+        )
+        other = dict(current)
+        other.update(
+            Ticker="OTHER",
+            SnapshotAsOfET="2026-02-05T09:00:00-05:00",
+            ConfigHash="different-selection-config",
+        )
+
+        mixed = build_episode_analysis(pd.DataFrame([current, other]))
+        self.assertEqual(1, mixed.summary["raw_signals"])
+        self.assertEqual(1, mixed.summary["excluded_version_signals"])
+        self.assertEqual(
+            {
+                "signal_engine_version": Config.SIGNAL_ENGINE_VERSION,
+                "config_hash": strategy_config_hash(),
+            },
+            mixed.summary["selection_cohort"],
+        )
+
+        missing_hash = build_episode_analysis(
+            pd.DataFrame([current]).drop(columns=["ConfigHash"])
+        )
+        self.assertEqual(0, missing_hash.summary["raw_signals"])
+        self.assertEqual(1, missing_hash.summary["excluded_version_signals"])
+        self.assertFalse(
+            missing_hash.summary["maturity"]["parameter_tuning_allowed"]
         )
 
 

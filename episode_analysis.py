@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from config import Config
+from trade_plan import strategy_config_hash
 
 
 @dataclass(frozen=True)
@@ -310,6 +311,7 @@ def _current_measurement_rows(
         "PlanMeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
         "V13MeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
         "SignalEngineVersion": Config.SIGNAL_ENGINE_VERSION,
+        "ConfigHash": strategy_config_hash(),
     }
     if not set(required_versions).issubset(performance.columns):
         return performance.iloc[0:0].copy(), len(performance)
@@ -317,23 +319,6 @@ def _current_measurement_rows(
     current = pd.Series(True, index=performance.index)
     for column, expected in required_versions.items():
         current &= performance[column].astype(str).eq(expected)
-
-    # ConfigHash 沒有可比對的常數,改要求「同一 cohort 內只能有一個值」:
-    # 現行引擎版本下若出現多個 hash,取最新快照那個,其餘一律排除。
-    if "ConfigHash" in performance.columns and current.any():
-        hashes = performance.loc[current, "ConfigHash"].astype(str)
-        if hashes.nunique() > 1:
-            order_column = (
-                "SnapshotAsOfET"
-                if "SnapshotAsOfET" in performance.columns
-                else None
-            )
-            if order_column:
-                newest = performance.loc[current].sort_values(order_column)
-                dominant = str(newest["ConfigHash"].astype(str).iloc[-1])
-            else:
-                dominant = str(hashes.mode().iloc[0])
-            current &= performance["ConfigHash"].astype(str).eq(dominant)
 
     return performance.loc[current].copy(), int((~current).sum())
 
@@ -352,6 +337,8 @@ def _markdown(summary: dict[str, Any]) -> str:
     lines = [
         "# V1.3 Shadow Episode Report",
         "",
+        f"- 選股 cohort：{summary['selection_cohort']['signal_engine_version']}"
+        f" / {summary['selection_cohort']['config_hash']}",
         f"- 輸入訊號：{summary['input_signals']}",
         f"- 排除非本版量尺：{summary['excluded_version_signals']}",
         f"- 原始日訊號：{summary['raw_signals']}",
@@ -443,6 +430,10 @@ def build_episode_analysis(
     summary = {
         "schema_version": Config.SNAPSHOT_SCHEMA_VERSION,
         "measurement_version": Config.SHADOW_MEASUREMENT_VERSION,
+        "selection_cohort": {
+            "signal_engine_version": Config.SIGNAL_ENGINE_VERSION,
+            "config_hash": strategy_config_hash(),
+        },
         "input_signals": input_signals,
         "excluded_version_signals": excluded_version_signals,
         "raw_signals": raw_signals,

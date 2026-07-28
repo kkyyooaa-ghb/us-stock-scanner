@@ -273,6 +273,9 @@ class Config:
     # ========== 執行時段護欄(原 V13.8.7;改 ET 視窗) ==========
     # 正常排程窗:美東 08:30–09:30 ET(盤前掃描);窗外執行加註警示
     PREMARKET_QUOTE_ET_HOUR_START = 4
+    # Yahoo 最後一筆盤前成交若超過此分鐘數，視為 stale_quote。
+    # 60 分鐘可涵蓋盤前較稀疏標的，同時不接受開盤前仍停在 04:xx 的舊價。
+    PREMARKET_QUOTE_MAX_AGE_MINUTES = 60
     DAILY_BAR_FINALIZATION_BUFFER_MINUTES = 15
     SCAN_NORMAL_ET_HOUR_START = 8
     SCAN_NORMAL_ET_MIN_START  = 30

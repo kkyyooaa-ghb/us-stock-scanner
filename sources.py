@@ -684,8 +684,10 @@ def get_premarket_quote(ticker: str, *,
             reference_basis=PREGAP_REFERENCE_BASIS,
         )
 
-    # 報價新鮮度:preMarketTime 必須落在「今日」盤前窗內,否則視為快取舊價
+    # 報價新鮮度:preMarketTime 必須落在今日盤前窗、不得在未來，
+    # 且不能離掃描時點過久；只驗「同日」仍會把 04:01 當成 09:24 的現價。
     quote_time_et = None
+    quote_age_minutes = None
     try:
         raw_time = info.get("preMarketTime")
         if raw_time is not None:
@@ -693,9 +695,15 @@ def get_premarket_quote(ticker: str, *,
                 float(raw_time), tz=timezone.utc
             ).astimezone(ET_TZ)
             quote_time_et = quote_dt.isoformat()
+            quote_age = now - quote_dt
+            quote_age_minutes = quote_age.total_seconds() / 60
             fresh = (
                 quote_dt.date() == now.date()
                 and is_premarket_quote_window(quote_dt)
+                and timedelta(0) <= quote_age
+                and quote_age <= timedelta(
+                    minutes=Config.PREMARKET_QUOTE_MAX_AGE_MINUTES
+                )
             )
         else:
             fresh = False
@@ -710,7 +718,10 @@ def get_premarket_quote(ticker: str, *,
             reference_date=reference_date,
             reference_basis=PREGAP_REFERENCE_BASIS,
             src="preMarketPrice",
-            err=f"{ticker} preMarketTime={quote_time_et} 不在今日盤前窗",
+            err=(
+                f"{ticker} preMarketTime={quote_time_et},"
+                f"age_min={quote_age_minutes} 不符合盤前新鮮度"
+            ),
         )
 
     price = float(pm)

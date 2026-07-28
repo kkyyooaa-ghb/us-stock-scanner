@@ -71,6 +71,17 @@ Status: resolved
 - `shadow_ready` 只允許三條正式腿與對應 anchor，且必須帶完整可執行欄位；
   empty、休市跳過與錯誤均為 typed control row。
 
+### Snapshot contract v1.3.2
+
+- PreGap 分母改為日期驗證過的訊號棒復權收盤；個股、SPY 與 QQQ 使用同一定義。
+- 保存盤前價、`preMarketTime`、參考價、參考日期、參考基準與定義版本。
+- 報價必須屬於本日盤前、不得晚於掃描時點，且年齡不超過 60 分鐘；
+  否則標記 `stale_quote`。參考棒日期不符則標記 `stale_reference`。
+- SPY 參考無效時，L2 與 FINAL 均 fail-closed，不輸出任何可執行進場建議。
+- 過期訊號棒的計畫在正式排名完成後降為 `data_stale`，不得進 shadow R。
+- Episode 閘門只接受現行 `(SignalEngineVersion, ConfigHash)` cohort。
+- 歷史 artifact 依原 schema 歸檔，未版本化 PreGap 不進分層統計。
+
 ## V1.3.1-shadow 成交量尺
 
 - 輸入必須是 `auto_adjust=False` 的 as-traded OHLC，並同時下載

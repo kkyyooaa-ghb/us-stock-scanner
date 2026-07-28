@@ -387,10 +387,13 @@ def generate_decision_summary(macro: dict, market_open: dict, df_go,
             'name':   "大盤狀態",
             'reason': "、".join(reasons_l2) or "訊號中性",
             'advice': l2_advice,
+            'reference_available': not reference_unavailable,
         }
     except Exception as e:
         summary['L2'] = {'light': '⚪', 'name': '大盤狀態',
-                         'reason': f'分析失敗: {e}', 'advice': '請手動判讀'}
+                         'reason': f'分析失敗: {e}',
+                         'advice': '本輪不提供進場建議',
+                         'reference_available': False}
 
     # ========== L3:個股訊號(原樣;basis 腿移除) ==========
     try:
@@ -437,9 +440,14 @@ def generate_decision_summary(macro: dict, market_open: dict, df_go,
         summary['L3'] = {'light': '⚪', 'name': '個股訊號',
                          'reason': f'分析失敗: {e}', 'advice': '請手動判讀'}
 
-    # ========== FINAL(一字未改) ==========
+    # ========== FINAL ==========
     lights = [summary[k]['light'] for k in ('L1', 'L2', 'L3') if summary[k]['light'] != '⚪']
-    if '🔴' in lights:
+    # SPY 基準不可用時，L2 本身雖是黃燈，若沿用一般黃燈文案仍會輸出
+    # 「減量 50% 操作」，與 fail-closed 自相矛盾。此狀態優先覆寫 FINAL。
+    if not summary.get('L2', {}).get('reference_available', False):
+        final_light = '🟡'
+        final_advice = '大盤基準不可用，本輪不提供進場建議'
+    elif '🔴' in lights:
         final_light = '🔴'
         final_advice = '今天休息 / 減倉 — 有紅燈,保護本金優先'
     elif '🟡' in lights:
