@@ -27,6 +27,11 @@ SNAPSHOT_COLUMNS = (
     "SnapshotRunStatus",
     "SnapshotErrorType",
     "SnapshotErrorMessage",
+    # ── V1.3.3 母體對帳:每檔恰好一筆紀錄,可評分者 data、其餘 universe_audit ──
+    "UniverseExpectedCount",
+    "UniverseDisposition",
+    "UniverseExclusionReason",
+    "DollarVolumeMedian20",
     "Ticker",
     "Price",
     "MA20",
@@ -123,6 +128,16 @@ SNAPSHOT_COLUMNS = (
 )
 
 
+UNIVERSE_EXCLUSION_REASONS = (
+    "insufficient_history",
+    "price_below_min",
+    "liquidity_below_min",
+    "stale_bar",
+    "download_missing",
+    "processing_error",
+)
+
+
 def snapshot_data_rows(frame: pd.DataFrame | None) -> pd.DataFrame:
     """Return only stock data rows from canonical or legacy snapshots."""
     if frame is None or frame.empty:
@@ -201,17 +216,22 @@ def canonicalize_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
         raise ValueError("snapshot schema version mismatch")
 
     record_type = source["SnapshotRecordType"].astype(str)
-    invalid_record_types = sorted(set(record_type) - {"data", "control"})
+    invalid_record_types = sorted(
+        set(record_type) - {"data", "control", "universe_audit"}
+    )
     if invalid_record_types:
         raise ValueError(
             "invalid SnapshotRecordType:" + ",".join(invalid_record_types)
         )
     data_mask = record_type.eq("data")
     control_mask = record_type.eq("control")
+    audit_mask = record_type.eq("universe_audit")
 
     run_status = source["SnapshotRunStatus"].astype(str)
     if not run_status[data_mask].eq("ok").all():
         raise ValueError("data rows require ok SnapshotRunStatus")
+    if not run_status[audit_mask].eq("ok").all():
+        raise ValueError("universe_audit rows require ok SnapshotRunStatus")
     allowed_control_statuses = {"empty", "error", "skipped"}
     invalid_control_statuses = sorted(
         set(run_status[control_mask]) - allowed_control_statuses
@@ -225,6 +245,75 @@ def canonicalize_snapshot(frame: pd.DataFrame | None) -> pd.DataFrame:
     if "SnapshotAsOfET" not in source.columns:
         raise ValueError("missing required snapshot columns:SnapshotAsOfET")
     _validate_snapshot_timestamps(source["SnapshotAsOfET"])
+
+    # ── V1.3.3 母體對帳:expected = processed + excluded + missing ──
+    # 每檔恰好一筆紀錄。可評分者為 data,其餘為 universe_audit —— 不允許用
+    # 零分或空值把無法評分的股票偽裝成普通資料列。
+    if data_mask.any() or audit_mask.any():
+        for column in ("UniverseExpectedCount", "UniverseDisposition"):
+            if column not in source.columns:
+                raise ValueError(f"missing universe column:{column}")
+
+        universe_mask = data_mask | audit_mask
+        expected = pd.to_numeric(
+            source.loc[universe_mask, "UniverseExpectedCount"],
+            errors="coerce",
+        )
+        if expected.isna().any() or expected.nunique() != 1:
+            raise ValueError("UniverseExpectedCount must be one finite value")
+        expected_count = int(expected.iloc[0])
+
+        disposition = source.loc[universe_mask, "UniverseDisposition"].astype(str)
+        invalid_dispositions = sorted(
+            set(disposition) - {"processed", "excluded", "missing"}
+        )
+        if invalid_dispositions:
+            raise ValueError(
+                "invalid UniverseDisposition:" + ",".join(invalid_dispositions)
+            )
+        if not source.loc[data_mask, "UniverseDisposition"].astype(str).eq(
+            "processed"
+        ).all():
+            raise ValueError("data rows require processed UniverseDisposition")
+        if source.loc[audit_mask, "UniverseDisposition"].astype(str).eq(
+            "processed"
+        ).any():
+            raise ValueError("universe_audit rows cannot be processed")
+
+        tickers = source.loc[universe_mask, "Ticker"].astype(str).str.strip()
+        if _blank(source.loc[universe_mask, "Ticker"]).any():
+            raise ValueError("universe rows require Ticker")
+        if tickers.duplicated().any():
+            duplicated = sorted(set(tickers[tickers.duplicated()]))
+            raise ValueError(
+                "universe ticker recorded more than once:" + ",".join(duplicated)
+            )
+        if int(universe_mask.sum()) != expected_count:
+            raise ValueError(
+                f"universe reconciliation failed:"
+                f"{int(data_mask.sum())} processed + "
+                f"{int(audit_mask.sum())} audit != {expected_count} expected"
+            )
+
+    if audit_mask.any():
+        if "UniverseExclusionReason" not in source.columns:
+            raise ValueError("universe_audit rows require UniverseExclusionReason")
+        reasons = source.loc[audit_mask, "UniverseExclusionReason"].astype(str)
+        invalid_reasons = sorted(set(reasons) - set(UNIVERSE_EXCLUSION_REASONS))
+        if invalid_reasons:
+            raise ValueError(
+                "invalid UniverseExclusionReason:" + ",".join(invalid_reasons)
+            )
+        # 無法評分的股票不得帶分數 —— 帶了就會被下游誤當普通標的彙總
+        for column in ("Priority", "Score"):
+            if column in source.columns:
+                scored = pd.to_numeric(
+                    source.loc[audit_mask, column], errors="coerce"
+                )
+                if scored.notna().any():
+                    raise ValueError(
+                        f"universe_audit rows must leave {column} empty"
+                    )
 
     if control_mask.any():
         if "SnapshotErrorType" not in source.columns:

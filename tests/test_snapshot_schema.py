@@ -18,6 +18,11 @@ from snapshot_schema import (
 
 def _base_data_row(**overrides):
     row = {
+        "SnapshotRecordType": "data",
+        "UniverseExpectedCount": 1,
+        "UniverseDisposition": "processed",
+        "UniverseExclusionReason": "",
+        "DollarVolumeMedian20": 500_000_000.0,
         "Ticker": "TEST",
         "Priority": 7,
         "Score": 7.5,

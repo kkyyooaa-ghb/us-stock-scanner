@@ -82,6 +82,23 @@ Status: resolved
 - Episode 閘門只接受現行 `(SignalEngineVersion, ConfigHash)` cohort。
 - 歷史 artifact 依原 schema 歸檔，未版本化 PreGap 不進分層統計。
 
+### Snapshot contract v1.3.3(母體資格 v1.2.1）
+
+- 母體資格改用 20 個完整交易日的 `median(Close × Volume)`，門檻 $20M；
+  台股沿用的股數門檻完整移除。股數與股價成反比，對高價股系統性失真。
+- 金額門檻、回看期、統計方式、最低價與資料新鮮度規則納入 `ConfigHash`，
+  因為母體資格會改變主題觸發與 Top 10。
+- 每檔恰好一筆母體紀錄：可評分者 `data`，其餘 `universe_audit` 並附六類
+  原因碼之一（`insufficient_history`／`price_below_min`／
+  `liquidity_below_min`／`stale_bar`／`download_missing`／`processing_error`）。
+- `universe_audit` 不得帶 Priority／Score —— 零分或空值偽裝會讓下游把無法
+  評分的股票當成普通標的彙總。
+- `expected = processed + excluded + missing` 由 schema 永久驗證，
+  同一 ticker 出現兩筆紀錄或總數不符即拒寫。
+- 訊號棒非最後完整交易日者不參與主題與排名（`stale_bar`）；行事曆不可用時
+  無從判斷，此時不排除，改由量測端的 `data_stale` 承接。
+- `snapshot_data_rows()` 仍只回傳 `data`，週報彙總與 shadow 量尺不受影響。
+
 ## V1.3.1-shadow 成交量尺
 
 - 輸入必須是 `auto_adjust=False` 的 as-traded OHLC，並同時下載

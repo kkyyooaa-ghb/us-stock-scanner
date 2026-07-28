@@ -81,6 +81,24 @@ except ImportError as _llm_e:
         return {"total": 0, "success": 0, "skipped": True, "elapsed_sec": 0, "details": []}
 
 
+def _assemble_snapshot(df_all, audit_df, timing, sealed_as_of_et, expected_count):
+    """Join scored rows and universe audit rows into one reconciled snapshot.
+
+    Audit rows are stamped with the same sealed timing as the scored rows so a
+    single file never disagrees with itself about when it was taken.
+    """
+    frames = [f for f in (df_all, audit_df) if f is not None and not f.empty]
+    if not frames:
+        return pd.DataFrame()
+    snapshot = pd.concat(frames, ignore_index=True)
+    snapshot["SnapshotAsOfET"] = sealed_as_of_et
+    snapshot["ScanSession"] = timing["scan_session"]
+    snapshot["ScanAfterOpen"] = int(bool(timing["scan_after_open"]))
+    snapshot["SnapshotTimingSource"] = timing["source"]
+    snapshot["UniverseExpectedCount"] = expected_count
+    return snapshot
+
+
 def _premarket_gap_note(gap_pct: float) -> str:
     """D7:個股盤前跳空標注(v1 只顯示、不進評分;n≥15 後再定權重)"""
     if abs(gap_pct) >= Config.PREMARKET_GAP_EXTREME_PCT:
@@ -256,6 +274,34 @@ def run_scanner():
     universe_ver = universe_version()
     smallcap_weak_snapshot = bool(otc_data.get("ok") and otc_data.get("weak"))
 
+    # V1.3.3:母體對帳。每檔恰好留一筆紀錄 —— 可評分者進 results(data 列),
+    # 其餘進 universe_audit,附六類原因碼之一。不再有靜默 continue。
+    audit_rows = []
+
+    def _audit(ticker: str, reason: str, *, dollar_median=None) -> None:
+        audit_rows.append({
+            'SnapshotRecordType':      'universe_audit',
+            'UniverseDisposition':     'missing'
+                                       if reason == 'download_missing'
+                                       else 'excluded',
+            'UniverseExclusionReason': reason,
+            'DollarVolumeMedian20':    dollar_median,
+            'Ticker':                  ticker,
+            'SnapshotAsOfET':          snapshot_as_of_et,
+            'SignalEngineVersion':     Config.SIGNAL_ENGINE_VERSION,
+            'MeasurementVersion':      Config.MEASUREMENT_VERSION,
+            'GitCommitSha':            git_commit_sha,
+            'ConfigHash':              config_hash,
+            'UniverseVersion':         universe_ver,
+            'ScanSession':             entry_timing["scan_session"],
+            'ScanAfterOpen':           int(entry_timing["scan_after_open"]),
+            'SnapshotTimingSource':    entry_timing["source"],
+            'PreGapStatus':            'not_attempted',
+            'TradePlanStatus':         'not_applicable',
+            'TradePlanVersion':        Config.TRADE_PLAN_VERSION,
+            'PlanMeasurementVersion':  Config.SHADOW_MEASUREMENT_VERSION,
+        })
+
     for idx, ticker in enumerate(Config.SCAN_POOL, 1):
         try:
             hist = get_series(price_data, 'Close',  ticker)
@@ -263,6 +309,10 @@ def run_scanner():
             high = get_series(price_data, 'High',   ticker)
             low  = get_series(price_data, 'Low',    ticker)
             open_data = get_series(price_data, 'Open', ticker)
+
+            if hist.empty or vol.empty:
+                _audit(ticker, 'download_missing')
+                continue
 
             # 排除當日盤中即時資料
             if not market_closed and len(hist) > 0 and str(hist.index[-1].date()) == today_str:
@@ -274,15 +324,30 @@ def run_scanner():
 
             # 需要 MA60 故要求至少 60 筆歷史資料
             if len(hist) < Config.MA_LONG_PERIOD or len(vol) < 5:
+                _audit(ticker, 'insufficient_history')
+                continue
+
+            # V1.2.1 資料新鮮度:訊號棒必須就是預期的最後完整交易日。
+            # 過期棒描述的是別天的市場,不得參與主題共振與排名。
+            # 行事曆不可用時無從判斷,此時不排除 —— 量測端另有 data_stale 防線。
+            data_bar_date = str(hist.index[-1].date())
+            if expected_bar_date and data_bar_date != expected_bar_date:
+                _audit(ticker, 'stale_bar')
                 continue
 
             price = float(hist.iloc[-1])
             if price < Config.MIN_PRICE_FILTER:
+                _audit(ticker, 'price_below_min')
                 continue
 
-            # 流動性過濾 — 日均量 < 100 萬股直接跳過(NDX 內幾乎不觸發,保留防呆)
-            avg_volume = float(vol.tail(20).mean())
-            if avg_volume < Config.MIN_AVG_VOLUME_LOTS * 1000:
+            # V1.2.1 流動性:20 個完整交易日的 median(Close x Volume)。
+            # 取代舊的股數門檻 —— 股數與股價成反比,對高價股系統性失真。
+            dollar_median = float(
+                (hist.tail(Config.LIQUIDITY_LOOKBACK_DAYS)
+                 * vol.tail(Config.LIQUIDITY_LOOKBACK_DAYS)).median()
+            )
+            if dollar_median < Config.MIN_DOLLAR_VOLUME_USD:
+                _audit(ticker, 'liquidity_below_min', dollar_median=dollar_median)
                 continue
 
             # 雙均線 — MA20 短期支撐 / MA60 位階判定(月線)
@@ -404,6 +469,10 @@ def run_scanner():
             score_pre_theme = priority_pre_theme + vol_ratio
 
             results.append({
+                'SnapshotRecordType':      'data',
+                'UniverseDisposition':     'processed',
+                'UniverseExclusionReason': '',
+                'DollarVolumeMedian20':    round(dollar_median, 2),
                 'Ticker':      ticker,
                 'Price':       price,
                 'MA20':        ma20,
@@ -492,11 +561,38 @@ def run_scanner():
                 print(f"  已分析 {idx}/{len(Config.SCAN_POOL)} 檔")
         except Exception as e:
             print(f"  ⚠️  {ticker} 處理失敗:{e}")
+            _audit(ticker, 'processing_error')
             continue
 
+    # 母體對帳(V1.3.3):expected = processed + excluded + missing
+    audit_df = pd.DataFrame(audit_rows)
+    expected_count = len(Config.SCAN_POOL)
+    processed_n, excluded_n = len(results), len(audit_rows)
+    missing_n = sum(1 for r in audit_rows
+                    if r['UniverseDisposition'] == 'missing')
+    print(f"\n📋 母體對帳:expected {expected_count} = processed {processed_n}"
+          f" + excluded {excluded_n - missing_n} + missing {missing_n}")
+    if excluded_n:
+        by_reason = {}
+        for r in audit_rows:
+            by_reason.setdefault(r['UniverseExclusionReason'], []).append(r['Ticker'])
+        for reason, names in sorted(by_reason.items()):
+            print(f"    {reason:22s} {len(names):2d}  {names[:8]}"
+                  f"{' ...' if len(names) > 8 else ''}")
+    if processed_n + excluded_n != expected_count:
+        print(f"  ❌ 對帳不平衡({processed_n + excluded_n} != {expected_count})")
+
     if not results:
+        # 全數落榜時 audit 更該保住 —— 它是唯一能說明「為什麼一檔都沒有」的紀錄
         print("⚠️  掃描完成但沒有可用股票列")
-        write_snapshot(pd.DataFrame(), "scan_result.csv")
+        if audit_df.empty:
+            write_snapshot(pd.DataFrame(), "scan_result.csv")
+        else:
+            write_snapshot(
+                _assemble_snapshot(pd.DataFrame(), audit_df, entry_timing,
+                                   snapshot_as_of_et, expected_count),
+                "scan_result.csv",
+            )
         return
     df_all = pd.DataFrame(results).sort_values('Score', ascending=False)
 
@@ -859,9 +955,14 @@ def run_scanner():
     msg += f"\n⏱ 耗時 {elapsed}s"
     send_telegram(msg)
 
-    # 儲存 CSV
-    write_snapshot(df_all, "scan_result.csv")
-    print(f"\n💾 scan_result.csv 已儲存")
+    # 儲存 CSV:data 列 + universe_audit 列 = 完整母體,schema 會驗證對帳
+    write_snapshot(
+        _assemble_snapshot(df_all, audit_df, entry_timing,
+                           snapshot_finalized_et.isoformat(), expected_count),
+        "scan_result.csv",
+    )
+    print(f"\n💾 scan_result.csv 已儲存({len(df_all)} data + "
+          f"{len(audit_df)} universe_audit)")
     print(f"✅ 完成!耗時 {elapsed}s\n")
 
 

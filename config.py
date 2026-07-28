@@ -44,11 +44,11 @@ import os
 
 class Config:
     # ========== 策略／量尺版本(V1.3 shadow) ==========
-    SIGNAL_ENGINE_VERSION        = "v1.2.0"
+    SIGNAL_ENGINE_VERSION        = "v1.2.1"
     TRADE_PLAN_VERSION           = "v1.3.1-shadow"
     MEASUREMENT_VERSION          = "legacy-v0"
     SHADOW_MEASUREMENT_VERSION   = "v1.3.1-shadow"
-    SNAPSHOT_SCHEMA_VERSION      = "v1.3.2"
+    SNAPSHOT_SCHEMA_VERSION      = "v1.3.3"
     # 盤前跳空定義版本。v0(未版本化)= 分母誤用 Yahoo regularMarketPreviousClose
     # (實為 Close[-2]),等於多算一個交易日,已知無效、不得進統計。
     PREGAP_DEFINITION_VERSION    = "v1.3.2-signal-bar-close"
@@ -169,9 +169,14 @@ class Config:
 
     # ========== 個股技術參數(原樣移植;美元計價) ==========
     MIN_PRICE_FILTER    = 10.0      # 低價股過濾(USD;NDX 內幾乎不觸發,保留通用性)
-    # 台股「張」概念不適用;名稱保留、值改「千股」單位:
-    # 1000(千股)= 1,000,000 股/日均量門檻(NDX 成分全數通過,保留防呆)
-    MIN_AVG_VOLUME_LOTS = 1000
+    # ── 流動性門檻(V1.2.1,2026-07-28 取代台股「張」概念的股數門檻)──
+    # 舊制 MIN_AVG_VOLUME_LOTS=1000(= 100 萬股/日)與真實流動性反向:
+    # 實測排除 MPWR(11.45 億美元/日,高於全池中位數 7.5 億)等 6 檔高價股,
+    # 卻留下全池唯一低於 1 億的 FER。改用與股價無關的成交金額。
+    # 門檻是執行容量護欄,不做報酬最佳化:全池最低 90M,20M 有 4.5x 邊際。
+    LIQUIDITY_LOOKBACK_DAYS   = 20          # 完整交易日
+    LIQUIDITY_STATISTIC       = "median"    # 對單日暴量穩健
+    MIN_DOLLAR_VOLUME_USD     = 20_000_000  # median(Close x Volume)
     THRESHOLD_VOL_RATIO = 1.2       # 量比門檻(日線量比,美股資料可靠 ✅)
     PRICE_LOW_PCT         = -0.20
     PRICE_HIGH_PCT        = 0.20

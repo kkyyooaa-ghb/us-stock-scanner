@@ -233,6 +233,13 @@ def strategy_config_hash() -> str:
         "min_priority": Config.MIN_PRIORITY_FOR_GO,
         "top_n": Config.TOP_N_RECOMMENDED,
         "time_exit_days": Config.TRADE_PLAN_TIME_EXIT_DAYS,
+        # V1.2.1:母體資格規則會改變主題觸發與 Top 10,必須進 cohort identity
+        "min_price": Config.MIN_PRICE_FILTER,
+        "min_dollar_volume_usd": Config.MIN_DOLLAR_VOLUME_USD,
+        "liquidity_lookback_days": Config.LIQUIDITY_LOOKBACK_DAYS,
+        "liquidity_statistic": Config.LIQUIDITY_STATISTIC,
+        "min_history_bars": Config.MA_LONG_PERIOD,
+        "bar_freshness_rule": "data_bar_must_equal_last_complete_session",
         "premarket_quote_start_hour": Config.PREMARKET_QUOTE_ET_HOUR_START,
         "daily_bar_finalization_buffer_minutes": (
             Config.DAILY_BAR_FINALIZATION_BUFFER_MINUTES
