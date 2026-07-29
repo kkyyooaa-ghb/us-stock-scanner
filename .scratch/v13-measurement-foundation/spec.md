@@ -189,3 +189,19 @@ Status: resolved
 - 本切片不啟用 V1.3 R、不回填 Notion 新欄位。
 - 本切片不調整任何 V1.2 選股權重。
 - 本切片不建立歷史 point-in-time 回測。
+
+## 每日快照健康監控
+
+- `evaluate_snapshot_health()` 是掃描後唯一健康檢查入口，輸出
+  `ok`／`warning`／`blocked`／`skipped` 與 `usable_for_shadow`。
+- canonical schema、完整母體 ticker 集合、Git SHA、快照日期一致性與
+  PreGap 可重算性屬阻擋條件；excluded／missing、非 available PreGap
+  與 Top 10 報價缺口屬警告，不直接丟棄可用的 forward 樣本。
+- 休市日 typed control row 回報 `skipped`；error／empty control row
+  回報 `blocked`。
+- 每日 workflow 保存 `snapshot_health.json`，並將 Markdown 摘要寫入
+  GitHub Step Summary；artifact 同時保留原始 `scan_result.csv`。
+- watchdog 於 09:15 與 09:20 ET 檢查正式掃描，第二次備援仍保留至少
+  10 分鐘盤前緩衝。
+- 本監控切片不改 SignalEngine、ConfigHash、TradePlan 或
+  ShadowMeasurement 版本，也不改選股與交易規則。

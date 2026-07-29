@@ -9,3 +9,4 @@
 | 05 Forward snapshot 盤前硬化 | task | resolved | 04 |
 | 06 PreGap v1.3.2 基準與 fail-closed 護欄 | task | resolved | 05 |
 | 07 母體資格改成成交金額 + 全池對帳 | task | resolved | 06 |
+| 08 每日快照健康監控與盤前備援緩衝 | task | resolved | 07 |

@@ -77,10 +77,20 @@ jobs:
           python -m snapshot_schema ensure scan_result.csv
           --error workflow_missing_output
 
+      - name: 驗證每日快照健康
+        if: always()
+        run: >-
+          python -m snapshot_health scan_result.csv
+          --expected-git-sha "$GITHUB_SHA"
+          --json-output snapshot_health.json
+          --markdown-output "$GITHUB_STEP_SUMMARY"
+
       - name: 上傳掃描結果
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scan-result-${{ github.run_id }}
-          path: scan_result.csv
+          path: |
+            scan_result.csv
+            snapshot_health.json
           retention-days: 30

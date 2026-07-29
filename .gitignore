@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
 scan_result.csv
+snapshot_health.json
 .env
