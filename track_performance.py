@@ -321,7 +321,9 @@ def main() -> int:
                 r_s = (f"R{res['r_value']:+.2f}" if res["r_value"] is not None
                        else "R不計")
                 sl  = " 🛑停損" if res["stop_hit"] else ""
-                print(f"  ✅ {p['title']:<18} D+5 {res['ret5']:+.2f}%  {r_s}{sl}")
+                d5_s = (f"{res['ret5']:+.2f}%" if res["ret5"] is not None
+                        else "未到")
+                print(f"  ✅ {p['title']:<18} D+5 {d5_s}  {r_s}{sl}")
                 done += 1
             else:
                 have = [s for s, v in (("D+1", res["ret1"]),
