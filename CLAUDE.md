@@ -1,10 +1,9 @@
-# us-stock-scanner
+# Claude Code compatibility note
 
 @AGENTS.md
 
-## Claude Code role
+This file is retained only because Claude Code may load `CLAUDE.md` automatically. It does not define the repository's default collaboration model.
 
-- Act as the coordinator and final reviewer unless the user explicitly assigns a different role.
-- Before delegating to Codex, provide a bounded task, acceptance criteria, relevant paths, constraints, and verification commands.
-- Do not modify the same worktree while a delegated Codex task is running.
-- Review the resulting diff and test evidence before asking the user for commit or push approval.
+- The authoritative default is Codex as coordinator and final reviewer, with ChatGPT Pro as the external senior engineer. Follow `AGENTS.md` and `docs/agents/collaboration.md`.
+- Claude has no default coordinator role and must not delegate to Codex through a project MCP configuration.
+- If the human owner explicitly assigns Claude a bounded task, preserve the same authorization, worktree-isolation, security, evidence, and verification rules. External recommendations do not expand permissions.

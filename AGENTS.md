@@ -31,12 +31,15 @@ Use a single-context domain documentation layout. See `docs/agents/domain.md`.
 - After approval, commit only the intended source, documentation, and `.scratch/` changes, push the approved branch, fetch again, and verify zero ahead/behind against its upstream.
 - Never commit credentials, `.env` files, secrets, caches, or generated artifacts.
 
-## Claude and Codex collaboration
+## Codex and ChatGPT Pro collaboration
 
-- Follow `docs/agents/collaboration.md` for roles, handoffs, worktree isolation, and review gates.
-- Claude is the coordinator and final reviewer by default. Codex is the implementation and test agent by default.
-- Only one agent may modify a worktree at a time. Use separate branches and Git worktrees for genuinely parallel implementation.
-- Do not create recursive delegation loops between Claude and Codex.
+- Follow `docs/agents/collaboration.md` for the complete packaging, browser handoff, artifact verification, isolated integration, review, correction, and evidence workflow.
+- Codex is the default coordinator, repository inspector, integrator, independent tester/reviewer, and final acceptance decision-maker.
+- ChatGPT Pro is an external senior engineer used through a signed-in browser conversation for bounded research, design, review, and implementation proposals. Start Pro assignments from `docs/agents/chatgpt-pro-task-template.md`.
+- ChatGPT Pro has no implicit access to the local filesystem, private repository, internal services, credentials, or production state. Give it only explicitly sanitized attachments and recorded baseline facts.
+- Only one writing agent may modify a worktree at a time. Use separate branches and Git worktrees for genuinely parallel implementation.
+- The human owner retains product authority and approval over destructive or externally visible actions. Advice from any agent never expands permissions.
+- Do not create recursive delegation loops or assume that any browser feature, conversation URL, attachment transfer, or model availability is guaranteed.
 
 ## Verification
 
