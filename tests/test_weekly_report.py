@@ -1,3 +1,4 @@
+import json
 import unittest
 import sys
 import types
@@ -17,11 +18,15 @@ from snapshot_schema import SNAPSHOT_COLUMNS, write_failure_snapshot
 from weekly_report import (
     build_message,
     calibration_engine,
+    legacy_v12_sample_complete,
+    load_v13_calibration_gate,
     notion_calibration_stats,
+    refresh_v13_episode_artifacts,
     summarize_calibration_rows,
     select_daily_artifacts,
-    v12_calibration_ready,
+    write_report_files,
 )
+from trade_plan import strategy_config_hash
 
 
 def _row(status, r=None, stop=False, dist="🎯 甜點價", gap=0):
@@ -60,6 +65,49 @@ def _aggregate():
         "warn_regulars": [],
         "dip": {"available": False},
     }
+
+
+def _v13_summary(completed=2, *, tuning_allowed=None):
+    minimum = Config.EPISODE_TUNING_MIN_COMPLETED
+    target = Config.EPISODE_TUNING_TARGET
+    if tuning_allowed is None:
+        tuning_allowed = completed >= minimum
+    if completed >= target:
+        stage = "target_reached"
+    elif completed >= minimum:
+        stage = "minimum_reached"
+    else:
+        stage = "collecting"
+    return {
+        "schema_version": Config.SNAPSHOT_SCHEMA_VERSION,
+        "trade_plan_version": Config.TRADE_PLAN_VERSION,
+        "measurement_version": Config.SHADOW_MEASUREMENT_VERSION,
+        "selection_cohort": {
+            "signal_engine_version": Config.SIGNAL_ENGINE_VERSION,
+            "config_hash": strategy_config_hash(),
+        },
+        "maturity": {
+            "completed_r": completed,
+            "minimum_completed": minimum,
+            "target_completed": target,
+            "remaining_to_minimum": max(minimum - completed, 0),
+            "remaining_to_target": max(target - completed, 0),
+            "stage": stage,
+            "parameter_tuning_allowed": tuning_allowed,
+        },
+        "by_selected_leg": [],
+        "by_order_type": [],
+    }
+
+
+def _v13_gate(completed=2):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "summary.json"
+        path.write_text(
+            json.dumps(_v13_summary(completed)),
+            encoding="utf-8",
+        )
+        return load_v13_calibration_gate(path)
 
 
 class SnapshotArchiveTests(unittest.TestCase):
@@ -294,7 +342,7 @@ class CalibrationEngineTests(unittest.TestCase):
 
 
 class CalibrationGateTests(unittest.TestCase):
-    def test_legacy_samples_do_not_unlock_v12_gate(self):
+    def test_legacy_samples_remain_historical_and_do_not_unlock_v13_gate(self):
         rows = (
             [_row("🔥 靈魂吸籌", r=-0.263) for _ in range(20)]
             + [_row("🔥 靈魂吸籌") for _ in range(24)]
@@ -305,7 +353,7 @@ class CalibrationGateTests(unittest.TestCase):
 
         self.assertEqual(22, calib["n_r"])
         self.assertEqual(2, calib["engine_stats"]["v1_2"]["n_r"])
-        self.assertFalse(v12_calibration_ready(calib))
+        self.assertFalse(legacy_v12_sample_complete(calib))
 
         message = build_message(
             _aggregate(),
@@ -313,24 +361,30 @@ class CalibrationGateTests(unittest.TestCase):
             calib,
             "2026-07-20",
             "2026-07-26",
+            _v13_gate(2),
         )
-        self.assertIn("V1.2.0 已定案 <b>2</b>/94 筆", message)
-        self.assertIn("V1.2.0 R 樣本累積中(2/15)", message)
+        self.assertIn("V1.3 completed-R <b>2</b>/60", message)
+        self.assertIn("禁止調參", message)
+        self.assertIn("V1.2.x legacy-v0:2/94", message)
         self.assertNotIn("D8 門檻已過", message)
 
-    def test_v12_gate_unlocks_at_fifteen_finalized_rows(self):
+    def test_fifteen_legacy_rows_do_not_unlock_v13_tuning(self):
         rows = [_row("📐 盤整甜點位", r=0.1) for _ in range(15)]
         calib = _calibration(rows)
 
-        self.assertTrue(v12_calibration_ready(calib))
+        self.assertTrue(legacy_v12_sample_complete(calib))
         message = build_message(
             _aggregate(),
             {"ok": True, "week_count": 15, "total_count": 15},
             calib,
             "2026-07-20",
             "2026-07-26",
+            _v13_gate(2),
         )
-        self.assertIn("D8 門檻已過", message)
+        self.assertIn("V1.2.x legacy-v0:15/15", message)
+        self.assertIn("V1.3 completed-R <b>2</b>/60", message)
+        self.assertIn("禁止調參", message)
+        self.assertNotIn("可依上方", message)
 
     def test_unclassified_rows_never_count_toward_v12_gate(self):
         rows = [_row("未標記策略", r=0.5) for _ in range(20)]
@@ -338,7 +392,180 @@ class CalibrationGateTests(unittest.TestCase):
 
         self.assertEqual(20, calib["engine_stats"]["unclassified"]["n_r"])
         self.assertEqual(0, calib["engine_stats"]["v1_2"]["n_r"])
-        self.assertFalse(v12_calibration_ready(calib))
+        self.assertFalse(legacy_v12_sample_complete(calib))
+
+
+class V13CalibrationGateTests(unittest.TestCase):
+    def _load(self, payload):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "summary.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            return load_v13_calibration_gate(path)
+
+    def test_validates_current_cohort_and_locks_before_sixty(self):
+        gate = self._load(_v13_summary(59))
+
+        self.assertTrue(gate["ok"])
+        self.assertEqual("collecting", gate["status"])
+        self.assertEqual(59, gate["completed_r"])
+        self.assertFalse(gate["parameter_tuning_allowed"])
+
+    def test_minimum_and_target_stages_are_reported_without_auto_tuning(self):
+        minimum = self._load(_v13_summary(60))
+        target = self._load(_v13_summary(100))
+
+        self.assertEqual("minimum_reached", minimum["status"])
+        self.assertTrue(minimum["parameter_tuning_allowed"])
+        self.assertEqual("target_reached", target["status"])
+        self.assertTrue(target["parameter_tuning_allowed"])
+
+    def test_missing_corrupt_or_mismatched_summary_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = load_v13_calibration_gate(Path(tmp) / "missing.json")
+            corrupt_path = Path(tmp) / "corrupt.json"
+            corrupt_path.write_text("{", encoding="utf-8")
+            corrupt = load_v13_calibration_gate(corrupt_path)
+
+        mismatched = _v13_summary(100)
+        mismatched["selection_cohort"]["config_hash"] = "wrong"
+        mismatch = self._load(mismatched)
+
+        self.assertEqual("summary_missing", missing["reason"])
+        self.assertEqual("summary_invalid_json", corrupt["reason"])
+        self.assertEqual("cohort_mismatch", mismatch["reason"])
+        for gate in (missing, corrupt, mismatch):
+            self.assertFalse(gate["ok"])
+            self.assertFalse(gate["parameter_tuning_allowed"])
+
+    def test_inconsistent_maturity_fails_closed(self):
+        gate = self._load(_v13_summary(2, tuning_allowed=True))
+
+        self.assertFalse(gate["ok"])
+        self.assertEqual("invalid_maturity", gate["reason"])
+
+    def test_segment_needs_twenty_completed_and_overall_minimum(self):
+        payload = _v13_summary(60)
+        payload["by_selected_leg"] = [{
+            "segment": "oversold_bounce",
+            "completed_r": 19,
+            "segment_min_completed": Config.EPISODE_SEGMENT_MIN_COMPLETED,
+            "tuning_ready": False,
+        }]
+
+        gate = self._load(payload)
+
+        self.assertTrue(gate["ok"])
+        self.assertFalse(gate["by_selected_leg"][0]["tuning_ready"])
+
+    def test_message_shows_fail_closed_reason(self):
+        message = build_message(
+            _aggregate(),
+            {"ok": False},
+            {"ok": False},
+            "2026-07-20",
+            "2026-07-26",
+            {
+                "ok": False,
+                "status": "blocked",
+                "reason": "cohort_mismatch",
+                "parameter_tuning_allowed": False,
+            },
+        )
+
+        self.assertIn("cohort_mismatch", message)
+        self.assertIn("fail-closed", message)
+        self.assertIn("禁止調參", message)
+
+    def test_zero_scan_week_still_exposes_fail_closed_gate(self):
+        message = build_message(
+            {"daily": []},
+            {"ok": False},
+            {"ok": False},
+            "2026-07-20",
+            "2026-07-26",
+            {
+                "ok": False,
+                "reason": "summary_missing",
+                "parameter_tuning_allowed": False,
+            },
+        )
+
+        self.assertIn("0 次", message)
+        self.assertIn("summary_missing", message)
+        self.assertIn("fail-closed 禁止調參", message)
+
+    def test_report_json_persists_the_validated_gate(self):
+        gate = _v13_gate(2)
+        message = build_message(
+            _aggregate(),
+            {"ok": False},
+            {"ok": False},
+            "2026-07-20",
+            "2026-07-26",
+            gate,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            write_report_files(
+                message,
+                _aggregate(),
+                {"ok": False},
+                {"ok": False},
+                "2026-07-20",
+                "2026-07-26",
+                [],
+                gate,
+                report_root=report_root,
+            )
+            payload = json.loads(
+                (report_root / "latest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(3, payload["schema_version"])
+        self.assertEqual(2, payload["v13_calibration_gate"]["completed_r"])
+        self.assertFalse(
+            payload["v13_calibration_gate"]["parameter_tuning_allowed"]
+        )
+
+    def test_refresh_runs_shadow_then_episode_after_daily_archive_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            daily = report_root / "daily" / "2026-07-27.csv"
+            daily.parent.mkdir(parents=True)
+            daily.write_text("Ticker\nTEST\n", encoding="utf-8")
+            calls = []
+
+            def track(argv):
+                calls.append(("shadow", argv))
+                return 0
+
+            def episodes(argv):
+                calls.append(("episodes", argv))
+                return 0
+
+            with patch("track_shadow_performance.main", side_effect=track), patch(
+                "build_shadow_episodes.main", side_effect=episodes
+            ):
+                result = refresh_v13_episode_artifacts(report_root)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(["shadow", "episodes"], [name for name, _ in calls])
+        self.assertIn(str(daily), calls[0][1])
+
+    def test_refresh_failure_does_not_continue_to_episode_builder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            daily = report_root / "daily" / "2026-07-27.csv"
+            daily.parent.mkdir(parents=True)
+            daily.write_text("Ticker\nTEST\n", encoding="utf-8")
+            with patch("track_shadow_performance.main", return_value=1), patch(
+                "build_shadow_episodes.main"
+            ) as episodes:
+                result = refresh_v13_episode_artifacts(report_root)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("shadow_refresh_failed", result["reason"])
+        episodes.assert_not_called()
 
 
 class NotionCalibrationTests(unittest.TestCase):

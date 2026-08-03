@@ -1,6 +1,7 @@
 name: 美股掃描週報(校準版)
 
-# V1.2.1(2026-07-27):校準樣本分代引擎統計；D8 只採 V1.2.0 R 樣本
+# V1.3.0(2026-08-03):V1.3 completed-R 60/100 為唯一調參閘門
+# V1.2.1(2026-07-27):Notion legacy-v0 分代引擎統計
 # V1.2.0(2026-07-23):週報 Markdown/JSON + 每日 CSV 永久提交 reports/
 # V1.1.0(2026-07-08):P1 track_performance 上線
 # ═══════════════════════════════════════════════════════════════
@@ -9,10 +10,9 @@ name: 美股掃描週報(校準版)
 # 步驟順序:
 #   1. track_performance.py — 回填 Notion 績效欄(掃描日收盤價/D+N報酬%/
 #      R值/是否觸發停損);continue-on-error,回填失敗不擋週報
-#   2. weekly_report.py — 彙總 + 📐 校準報告 + reports/永久檔
-#   3. track_shadow_performance.py — 以永久 daily CSV 重算 V1.3 shadow 量尺
-#   4. build_shadow_episodes.py — episode 去重、生命週期與樣本成熟度
-#   5. commit reports/ — Markdown/JSON/每日 CSV/shadow 量尺成為 Git 可追溯資料
+#   2. weekly_report.py — 封存本週 daily CSV → 重算 V1.3 shadow/episodes →
+#      驗證 60/100 閘門 → 產出並推播同源週報
+#   3. commit reports/ — Markdown/JSON/每日 CSV/shadow 量尺成為 Git 可追溯資料
 # 資料源:本 repo 的 scan-result artifacts(內建 GITHUB_TOKEN,actions:read,
 #        不需任何新憑證)+ Notion 樣本計數與回填欄(同一組 secrets,失敗優雅)
 # ═══════════════════════════════════════════════════════════════
@@ -60,7 +60,7 @@ jobs:
           NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
         run: python track_performance.py
 
-      - name: 產出並推播週報
+      - name: 封存快照、重算 V1.3 閘門並推播週報
         env:
           GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}   # 內建,免設定
           NOTION_TOKEN:     ${{ secrets.NOTION_TOKEN }}
@@ -69,30 +69,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_WEEK_END:  ${{ inputs.report_week_end }}
         run: python weekly_report.py
-
-      - name: V1.3 shadow 成交與 R 區間
-        continue-on-error: true
-        run: |
-          shopt -s nullglob
-          snapshots=(reports/daily/*.csv)
-          if [ ${#snapshots[@]} -eq 0 ]; then
-            echo "尚無 daily snapshots,跳過 V1.3 shadow 回填"
-          else
-            python track_shadow_performance.py "${snapshots[@]}" \
-              --output reports/shadow_performance.csv
-          fi
-
-      - name: V1.3 episode 與成熟度報告
-        continue-on-error: true
-        run: |
-          if [ -f reports/shadow_performance.csv ]; then
-            python build_shadow_episodes.py reports/shadow_performance.csv \
-              --episodes-output reports/shadow_episodes.csv \
-              --summary-output reports/shadow_episode_summary.json \
-              --markdown-output reports/shadow_episode_summary.md
-          else
-            echo "尚無 shadow performance,跳過 episode 報告"
-          fi
 
       - name: 永久保存週報與每日 CSV
         run: |
