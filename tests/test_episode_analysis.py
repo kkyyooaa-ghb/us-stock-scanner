@@ -173,6 +173,10 @@ class EpisodeKpiTests(unittest.TestCase):
         self.assertTrue(analysis.episodes.empty)
         self.assertEqual(0, analysis.summary["episodes"])
         self.assertEqual("collecting", analysis.summary["maturity"]["stage"])
+        self.assertEqual(
+            Config.TRADE_PLAN_VERSION,
+            analysis.summary["trade_plan_version"],
+        )
 
     def test_reports_lifecycle_r_interval_and_segment_metrics(self):
         performance = pd.DataFrame([

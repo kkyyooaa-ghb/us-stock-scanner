@@ -1,7 +1,7 @@
-# us-stock-scanner V1.2.0 部署與排程手冊
+# us-stock-scanner V1.2.1／V1.3 shadow 部署與排程手冊
 
 血統：台股 stock-scanner V13.13.8 → 架構 2 美股移植；目前正式版本與進度請見
-`PROGRESS_2026-07-23.md`。
+`PROGRESS_2026-07-27.md`。
 
 ## 1. 核心檔案
 
@@ -31,7 +31,7 @@
 
 - 主觸發：cron-job.org，週一至週五 09:00 ET，呼叫 `scan.yml` 的
   `workflow_dispatch`。
-- 備援：`scan_watchdog.yml` 在 09:15、09:25 ET 檢查當日執行紀錄。
+- 備援：`scan_watchdog.yml` 在 09:15、09:20 ET 檢查當日執行紀錄。
   找到成功、排隊中或執行中的掃描就不動作；找不到或只有失敗紀錄才補觸發。
 - watchdog 同時保留 EDT/EST 兩組 UTC cron，並由 `America/New_York`
   offset gate 只放行當季正確的一組。
@@ -72,7 +72,7 @@ PAT 必須能執行 Actions workflow。
 
 1. 確認 Secrets 與 cron-job.org PAT 有效。
 2. 交易日 09:00 ET 確認 `scan.yml` 被主排程觸發。
-3. 09:15/09:25 ET 確認 watchdog 找到健康 run 並跳過補跑。
+3. 09:15/09:20 ET 確認 watchdog 找到健康 run 並跳過補跑。
 4. 確認 Telegram 推播、Notion `YYYY-MM-DD_<Ticker>` 紀錄與
    `scan-result-*` artifact。
 5. 週日確認 `reports/latest.md`、`reports/latest.json` 與週別封存已提交。

@@ -429,6 +429,7 @@ def build_episode_analysis(
     )
     summary = {
         "schema_version": Config.SNAPSHOT_SCHEMA_VERSION,
+        "trade_plan_version": Config.TRADE_PLAN_VERSION,
         "measurement_version": Config.SHADOW_MEASUREMENT_VERSION,
         "selection_cohort": {
             "signal_engine_version": Config.SIGNAL_ENGINE_VERSION,

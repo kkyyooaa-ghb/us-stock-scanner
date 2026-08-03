@@ -1,6 +1,6 @@
 """
-美股掃描週報 V1.2.1(分代引擎校準 + 永久歸檔)
-================================
+美股掃描週報 V1.3.0(V1.3 episode 閘門 + legacy baseline + 永久歸檔)
+================================================================
 目的:觀察期的每週數據彙總 — 回答「精選 0 檔是否結構性?分數分布長怎樣?
      MIN_PRIORITY_FOR_GO=7 初始值該定哪?」這組問題。
      V1.1.0(2026-07-08):P1 track_performance 已上線 → 新增「📐 校準報告」
@@ -8,8 +8,9 @@
      對齊台股週日校準節奏;為 V1.2.0 計分核心重寫提供舊引擎 baseline。
      V1.2.0(2026-07-23):週報 Markdown/JSON + 每日完整 CSV 永久保存至
      reports/,Telegram 降為同源推播端,不再是唯一週報來源。
-     V1.2.1(2026-07-27):校準樣本依 Status 策略前綴切分世代；D8 門檻
-     只採 V1.2.0 新引擎 R 樣本，舊 🔥 引擎僅保留為 baseline。
+     V1.2.1(2026-07-27):校準樣本依 Status 策略前綴切分世代。
+     V1.3.0(2026-08-03):V1.3 shadow completed-R 60/100 成為唯一調參閘門；
+     Notion legacy-v0 的 15 筆 D8 統計降為歷史 baseline，不再授權調參。
 
 資料源:
   1. 本 repo 的 scan-result-* artifacts(GitHub API,內建 GITHUB_TOKEN,
@@ -33,6 +34,7 @@ from pathlib import Path
 import requests
 from config import Config
 from snapshot_schema import snapshot_data_rows, write_snapshot
+from trade_plan import strategy_config_hash
 
 try:
     from zoneinfo import ZoneInfo
@@ -42,7 +44,7 @@ except Exception:
 
 GH_API = "https://api.github.com"
 REPORT_ROOT = Path(__file__).resolve().parent / "reports"
-CALIBRATION_MIN_R = 15
+LEGACY_CALIBRATION_MIN_R = 15
 LEGACY_MEASUREMENT_VERSION = "legacy-v0"
 V12_STATUS_PREFIXES = ("📐", "📉", "🌤️")
 LEGACY_STATUS_PREFIXES = ("🔥",)
@@ -416,10 +418,220 @@ def summarize_calibration_rows(rows: list[dict]) -> dict:
     }
 
 
-def v12_calibration_ready(calib: dict) -> bool:
-    """D8 readiness 僅由 V1.2.0 新引擎的已定案 R 樣本決定。"""
+def legacy_v12_sample_complete(calib: dict) -> bool:
+    """歷史 D8 樣本是否完整；此結果不授權 V1.3 調參。"""
     v12 = (calib or {}).get("engine_stats", {}).get("v1_2", {})
-    return v12.get("n_r", 0) >= CALIBRATION_MIN_R
+    return v12.get("n_r", 0) >= LEGACY_CALIBRATION_MIN_R
+
+
+def _blocked_v13_gate(reason: str, detail: str = "") -> dict:
+    """Return a machine-readable fail-closed V1.3 gate."""
+    return {
+        "ok": False,
+        "status": "blocked",
+        "reason": reason,
+        "detail": detail,
+        "parameter_tuning_allowed": False,
+        "expected": {
+            "schema_version": Config.SNAPSHOT_SCHEMA_VERSION,
+            "signal_engine_version": Config.SIGNAL_ENGINE_VERSION,
+            "trade_plan_version": Config.TRADE_PLAN_VERSION,
+            "measurement_version": Config.SHADOW_MEASUREMENT_VERSION,
+            "config_hash": strategy_config_hash(),
+            "minimum_completed": Config.EPISODE_TUNING_MIN_COMPLETED,
+            "target_completed": Config.EPISODE_TUNING_TARGET,
+            "segment_min_completed": Config.EPISODE_SEGMENT_MIN_COMPLETED,
+        },
+    }
+
+
+def _nonnegative_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def load_v13_calibration_gate(
+    summary_path: str | Path = REPORT_ROOT / "shadow_episode_summary.json",
+) -> dict:
+    """Load and strictly validate the current V1.3 episode maturity gate.
+
+    Missing, malformed or mismatched summaries never inherit an older readiness
+    decision. They return a blocked gate so report generation can continue while
+    parameter tuning remains explicitly forbidden.
+    """
+    path = Path(summary_path)
+    if not path.is_file():
+        return _blocked_v13_gate("summary_missing", str(path))
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return _blocked_v13_gate("summary_invalid_json", str(exc))
+    except OSError as exc:
+        return _blocked_v13_gate("summary_unreadable", str(exc))
+    if not isinstance(summary, dict):
+        return _blocked_v13_gate("summary_invalid_shape")
+
+    cohort = summary.get("selection_cohort")
+    expected_identity = {
+        "schema_version": Config.SNAPSHOT_SCHEMA_VERSION,
+        "trade_plan_version": Config.TRADE_PLAN_VERSION,
+        "measurement_version": Config.SHADOW_MEASUREMENT_VERSION,
+    }
+    actual_identity = {
+        key: summary.get(key)
+        for key in expected_identity
+    }
+    if actual_identity != expected_identity:
+        return _blocked_v13_gate(
+            "version_mismatch",
+            f"expected={expected_identity}; actual={actual_identity}",
+        )
+    expected_cohort = {
+        "signal_engine_version": Config.SIGNAL_ENGINE_VERSION,
+        "config_hash": strategy_config_hash(),
+    }
+    if not isinstance(cohort, dict) or {
+        key: cohort.get(key) for key in expected_cohort
+    } != expected_cohort:
+        return _blocked_v13_gate(
+            "cohort_mismatch",
+            f"expected={expected_cohort}; actual={cohort}",
+        )
+
+    maturity = summary.get("maturity")
+    if not isinstance(maturity, dict):
+        return _blocked_v13_gate("invalid_maturity", "maturity must be an object")
+    completed = maturity.get("completed_r")
+    minimum = maturity.get("minimum_completed")
+    target = maturity.get("target_completed")
+    if (
+        not _nonnegative_int(completed)
+        or minimum != Config.EPISODE_TUNING_MIN_COMPLETED
+        or target != Config.EPISODE_TUNING_TARGET
+        or not _nonnegative_int(minimum)
+        or not _nonnegative_int(target)
+        or target < minimum
+    ):
+        return _blocked_v13_gate("invalid_maturity", f"actual={maturity}")
+
+    expected_status = (
+        "target_reached"
+        if completed >= target
+        else "minimum_reached"
+        if completed >= minimum
+        else "collecting"
+    )
+    expected_allowed = completed >= minimum
+    if (
+        maturity.get("stage") != expected_status
+        or maturity.get("parameter_tuning_allowed") is not expected_allowed
+        or maturity.get("remaining_to_minimum") != max(minimum - completed, 0)
+        or maturity.get("remaining_to_target") != max(target - completed, 0)
+    ):
+        return _blocked_v13_gate("invalid_maturity", f"actual={maturity}")
+
+    validated_segments = {}
+    for key in ("by_selected_leg", "by_order_type"):
+        segments = summary.get(key)
+        if not isinstance(segments, list):
+            return _blocked_v13_gate("invalid_segments", f"{key} must be a list")
+        for segment in segments:
+            if not isinstance(segment, dict):
+                return _blocked_v13_gate("invalid_segments", f"{key} row must be an object")
+            segment_completed = segment.get("completed_r")
+            segment_minimum = segment.get("segment_min_completed")
+            expected_ready = (
+                expected_allowed
+                and _nonnegative_int(segment_completed)
+                and segment_completed >= Config.EPISODE_SEGMENT_MIN_COMPLETED
+            )
+            if (
+                not _nonnegative_int(segment_completed)
+                or segment_minimum != Config.EPISODE_SEGMENT_MIN_COMPLETED
+                or segment.get("tuning_ready") is not expected_ready
+            ):
+                return _blocked_v13_gate(
+                    "invalid_segments",
+                    f"{key} inconsistent row={segment}",
+                )
+        validated_segments[key] = segments
+
+    return {
+        "ok": True,
+        "status": expected_status,
+        "reason": None,
+        "parameter_tuning_allowed": expected_allowed,
+        "completed_r": completed,
+        "minimum_completed": minimum,
+        "target_completed": target,
+        "remaining_to_minimum": max(minimum - completed, 0),
+        "remaining_to_target": max(target - completed, 0),
+        "schema_version": summary["schema_version"],
+        "signal_engine_version": cohort["signal_engine_version"],
+        "trade_plan_version": summary["trade_plan_version"],
+        "measurement_version": summary["measurement_version"],
+        "config_hash": cohort["config_hash"],
+        **validated_segments,
+    }
+
+
+def refresh_v13_episode_artifacts(report_root: Path = REPORT_ROOT) -> dict:
+    """Rebuild V1.3 shadow and episode artifacts from all archived snapshots.
+
+    The weekly report calls this after archiving the current week's snapshots and
+    before rendering. Any failure is returned to the caller so the visible gate
+    can fail closed instead of silently reusing a stale summary.
+    """
+    snapshots = sorted((report_root / "daily").glob("*.csv"))
+    if not snapshots:
+        return {"ok": False, "reason": "no_daily_snapshots"}
+
+    performance_path = report_root / "shadow_performance.csv"
+    episodes_path = report_root / "shadow_episodes.csv"
+    summary_path = report_root / "shadow_episode_summary.json"
+    markdown_path = report_root / "shadow_episode_summary.md"
+    try:
+        from track_shadow_performance import main as track_shadow_main
+        from build_shadow_episodes import main as build_episodes_main
+
+        shadow_result = track_shadow_main([
+            *[str(path) for path in snapshots],
+            "--output",
+            str(performance_path),
+        ])
+        if shadow_result != 0:
+            return {
+                "ok": False,
+                "reason": "shadow_refresh_failed",
+                "exit_code": shadow_result,
+            }
+
+        episode_result = build_episodes_main([
+            str(performance_path),
+            "--episodes-output",
+            str(episodes_path),
+            "--summary-output",
+            str(summary_path),
+            "--markdown-output",
+            str(markdown_path),
+        ])
+        if episode_result != 0:
+            return {
+                "ok": False,
+                "reason": "episode_refresh_failed",
+                "exit_code": episode_result,
+            }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": "episode_refresh_exception",
+            "detail": f"{type(exc).__name__}:{exc}",
+        }
+
+    return {
+        "ok": True,
+        "summary_path": str(summary_path),
+        "snapshot_count": len(snapshots),
+    }
 
 
 def notion_calibration_stats() -> dict:
@@ -499,17 +711,35 @@ def notion_calibration_stats() -> dict:
 # 4. 組訊息 + 推播
 # ==========================================================================
 def build_message(agg: dict, notion: dict, calib: dict,
-                  week_start: str, week_end: str) -> str:
+                  week_start: str, week_end: str,
+                  v13_gate: dict | None = None) -> str:
     daily = agg["daily"]
     n_days = len(daily)
+    v13_gate = v13_gate or _blocked_v13_gate("summary_not_supplied")
     if n_days == 0:
-        return (f"<b>📋 美股掃描週報(觀察期)</b>  {week_start} ~ {week_end}\n\n"
-                f"🚨 本週 <b>0 次</b>掃描紀錄 — 排程可能漏跑,"
-                f"請檢查 Actions 是否有執行/失敗。")
+        if v13_gate.get("ok"):
+            gate_line = (
+                f"V1.3 completed-R {v13_gate['completed_r']}/"
+                f"{v13_gate['minimum_completed']}；本週無新快照，不變更調參狀態。"
+            )
+        else:
+            gate_line = (
+                f"V1.3 gate unavailable ({v13_gate.get('reason', 'unknown')})；"
+                "fail-closed 禁止調參。"
+            )
+        return (
+            f"<b>📋 美股掃描週報(觀察期)</b>  {week_start} ~ {week_end}\n\n"
+            f"🚨 本週 <b>0 次</b>掃描紀錄 — 排程可能漏跑,"
+            f"請檢查 Actions 是否有執行/失敗。\n\n{gate_line}"
+        )
 
     avg = lambda k: sum(d[k] for d in daily) / n_days
 
-    phase = "校準期" if (calib or {}).get("n_r", 0) > 0 else "觀察期"
+    phase = (
+        "校準期"
+        if v13_gate.get("ok") or (calib or {}).get("n_r", 0) > 0
+        else "觀察期"
+    )
     lines = [f"<b>📋 美股掃描週報({phase})</b>  {week_start} ~ {week_end}",
              f"掃描天數 <b>{n_days}</b> | 日均分析 {avg('n'):.0f} 檔", "",
              "<b>分數分布(日均)</b>",
@@ -546,12 +776,52 @@ def build_message(agg: dict, notion: dict, calib: dict,
         lines.append("<b>Notion 樣本</b>  讀取略過")
     lines.append("")
 
-    # ── 校準報告(V1.1.0:P1 回填上線後啟用)──
+    # ── V1.3 唯一調參閘門(completed-R episodes,版本與 cohort fail-closed)──
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("<b>🧪 V1.3 調參閘門</b>(shadow completed-R episodes)")
+    if v13_gate.get("ok"):
+        completed = v13_gate["completed_r"]
+        minimum = v13_gate["minimum_completed"]
+        target = v13_gate["target_completed"]
+        lines.append(
+            f"  V1.3 completed-R <b>{completed}</b>/{minimum}"
+            f"（目標 {target}）| {v13_gate['status']}"
+        )
+        lines.append(
+            f"  Engine {v13_gate['signal_engine_version']} | "
+            f"TradePlan {v13_gate['trade_plan_version']} | "
+            f"Measurement {v13_gate['measurement_version']}"
+        )
+        lines.append(
+            f"  Schema {v13_gate['schema_version']} | "
+            f"ConfigHash {v13_gate['config_hash']}"
+        )
+        if v13_gate["status"] == "target_reached":
+            lines.append(
+                "  ✅ 已達 100 筆目標；可進行正式升版評估，但不自動修改參數。"
+            )
+        elif v13_gate["parameter_tuning_allowed"]:
+            lines.append(
+                "  🟡 已達 60 筆全體門檻，可啟動參數分析；"
+                "各策略腿／order type 仍須各自滿 20 筆。"
+            )
+        else:
+            lines.append(
+                f"  🔒 尚差 {v13_gate['remaining_to_minimum']} 筆；"
+                "未達 60 前禁止調參。"
+            )
+    else:
+        reason = v13_gate.get("reason", "unknown")
+        lines.append(f"  ⛔ V1.3 gate unavailable ({reason})")
+        lines.append("  🔒 fail-closed：禁止調參，不沿用舊週或 legacy readiness。")
+    lines.append("")
+
+    # ── legacy-v0 歷史 baseline；不再授權任何 V1.3 調參──
     calib = calib or {}
     if calib.get("ok") and calib.get("n_r", 0) > 0:
         lines.append("━━━━━━━━━━━━━━━━━━")
         lines.append(
-            "<b>📐 校準報告</b>"
+            "<b>📎 歷史校準 baseline</b>"
             "(legacy-v0:R模擬 D+5收盤出場/觸停損-1R)"
         )
         lines.append(f"  全期已定案 <b>{calib['n_r']}</b>/{calib['n_total']} 筆")
@@ -560,13 +830,11 @@ def build_message(agg: dict, notion: dict, calib: dict,
         legacy = engine_stats.get("legacy", {})
         unknown = engine_stats.get("unclassified", {})
         if engine_stats:
-            v12_progress = (
-                "✅ 已達門檻" if v12_calibration_ready(calib)
-                else f"{v12.get('n_r', 0)}/{CALIBRATION_MIN_R}"
-            )
             lines.append(
-                f"  V1.2.0 已定案 <b>{v12.get('n_r', 0)}</b>/"
-                f"{v12.get('n_total', 0)} 筆 | D8 進度 {v12_progress}"
+                f"  V1.2.x legacy-v0:{v12.get('n_r', 0)}/"
+                f"{v12.get('n_total', 0)} 筆 | 舊 D8 樣本 "
+                f"{v12.get('n_r', 0)}/{LEGACY_CALIBRATION_MIN_R}"
+                + ("（歷史完整）" if legacy_v12_sample_complete(calib) else "")
             )
             lines.append(
                 f"  舊引擎 baseline:{legacy.get('n_r', 0)}/"
@@ -575,16 +843,16 @@ def build_message(agg: dict, notion: dict, calib: dict,
             if unknown.get("n_total", 0):
                 lines.append(
                     f"  ⚠️ 未分類:{unknown.get('n_r', 0)}/"
-                    f"{unknown['n_total']} 筆(不計入 D8)"
+                    f"{unknown['n_total']} 筆(不計入歷史 D8)"
                 )
         else:
-            lines.append("  ⚠️ 引擎分代資料不可用，D8 不判定")
+            lines.append("  ⚠️ 引擎分代資料不可用，歷史 D8 不判定")
         lines.append(f"  全期 R期望值 <b>{calib['r_mean']:+.2f}</b> | "
                      f"勝率 {calib['win_rate']:.0%} | "
                      f"停損率 {calib['stop_rate']:.0%}")
         if v12.get("n_r", 0):
             lines.append(
-                f"  V1.2.0 R期望值 <b>{v12['r_mean']:+.2f}</b> | "
+                f"  V1.2.x legacy-v0 R期望值 <b>{v12['r_mean']:+.2f}</b> | "
                 f"勝率 {v12['win_rate']:.0%} | "
                 f"停損率 {v12['stop_rate']:.0%}"
             )
@@ -628,27 +896,28 @@ def build_message(agg: dict, notion: dict, calib: dict,
             lines.append(f"  📉 <b>超賣反彈候選</b>:{names}")
         lines.append("")
 
-    # 週報判讀(規則式,不做主觀建議)
-    v12_n_r = (
-        calib.get("engine_stats", {}).get("v1_2", {}).get("n_r", 0)
-        if calib.get("ok") else 0
-    )
-    if v12_calibration_ready(calib):
-        lines.append("💡 <i>V1.2.0 校準樣本已達 n≥15 且 R 已回填 — D8 門檻已過,"
-                     "可依上方位階/跳空分組差異啟動 V1.2.0 計分核心校準。</i>")
-    elif calib.get("ok") and calib.get("n_r", 0) > 0:
+    # 週報判讀只服從 V1.3 gate；legacy 與分數分布均不得解鎖調參。
+    if not v13_gate.get("ok"):
         lines.append(
-            f"💡 <i>V1.2.0 R 樣本累積中({v12_n_r}/{CALIBRATION_MIN_R});"
-            "舊引擎樣本只作 baseline,不計入 D8。"
-            "達門檻後再啟動權重與 MIN_PRIORITY_FOR_GO 校準。</i>"
+            "💡 <i>V1.3 成熟度不可驗證；依 fail-closed 規則禁止調整權重、"
+            "量縮門檻或 MIN_PRIORITY_FOR_GO。</i>"
         )
-    elif agg["total_ge7"] == 0:
-        lines.append("💡 <i>本週 0 檔達 7 分門檻。法人腿停用下,達標僅剩"
-                     "「吸籌+季營收+主題」一路;6 分常客即是門檻定值的候選證據。"
-                     "累積 2 週以上分布後再議 MIN_PRIORITY_FOR_GO(D8:數據先、規則後)。</i>")
+    elif v13_gate["status"] == "target_reached":
+        lines.append(
+            "💡 <i>V1.3 已達 100 筆 completed-R 目標；下一步是版本化分析、"
+            "獨立驗證與升版決策，不會自動套用參數。</i>"
+        )
+    elif v13_gate["parameter_tuning_allowed"]:
+        lines.append(
+            "💡 <i>V1.3 已達 60 筆 completed-R 最低門檻；可開始全體參數分析，"
+            "各 segment 仍須滿 20 筆才可個別判讀。</i>"
+        )
     else:
-        lines.append("💡 <i>本週已有達門檻精選 — 等 P1 報酬回填上線後,"
-                     "週報將升級為完整校準報告(R 期望值/勝率/n 進度)。</i>")
+        lines.append(
+            f"💡 <i>V1.3 completed-R 累積中"
+            f"({v13_gate['completed_r']}/{v13_gate['minimum_completed']});"
+            "未達門檻前禁止調參。legacy-v0 只作歷史 baseline。</i>"
+        )
 
     return "\n".join(lines)
 
@@ -695,6 +964,7 @@ def telegram_html_to_markdown(message: str) -> str:
 def write_report_files(message: str, agg: dict, notion: dict, calib: dict,
                        week_start: str, week_end: str,
                        archived_csv_files: list[str],
+                       v13_gate: dict | None = None,
                        report_root: Path = REPORT_ROOT) -> list[str]:
     """
     同一份週報資料一次寫出:
@@ -712,17 +982,21 @@ def write_report_files(message: str, agg: dict, notion: dict, calib: dict,
     )
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     snapshot = {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at_utc": generated_at,
         "period": {"start": week_start, "end": week_end, "timezone": "America/New_York"},
         "sources": {
             "scan_csv": archived_csv_files,
             "notion_database": os.environ.get("NOTION_DB_ID", ""),
+            "shadow_episode_summary": "reports/shadow_episode_summary.json",
             "telegram": "delivery_only",
         },
         "aggregate": _json_safe(agg),
         "notion_samples": _json_safe(notion),
         "calibration": _json_safe(calib),
+        "v13_calibration_gate": _json_safe(
+            v13_gate or _blocked_v13_gate("summary_not_supplied")
+        ),
         "telegram_html": message,
         "markdown": markdown,
     }
@@ -805,11 +1079,37 @@ def main():
     agg = aggregate(days) if days else {"daily": [], "top5": [],
                                         "eq6_regulars": [], "warn_regulars": [],
                                         "total_ge7": 0}
+    refresh = refresh_v13_episode_artifacts(REPORT_ROOT)
+    if refresh.get("ok"):
+        v13_gate = load_v13_calibration_gate(refresh["summary_path"])
+    else:
+        v13_gate = _blocked_v13_gate(
+            refresh.get("reason", "episode_refresh_failed"),
+            refresh.get("detail", ""),
+        )
+    if v13_gate.get("ok"):
+        print(
+            "🧪 V1.3 gate:"
+            f"{v13_gate['completed_r']}/{v13_gate['minimum_completed']} "
+            f"({v13_gate['status']})"
+        )
+    else:
+        print(f"⛔ V1.3 gate fail-closed:{v13_gate['reason']}")
+
     notion = notion_sample_counts(week_start, week_end)
     calib  = notion_calibration_stats()
-    msg = build_message(agg, notion, calib, week_start, week_end)
+    msg = build_message(
+        agg, notion, calib, week_start, week_end, v13_gate
+    )
     report_files = write_report_files(
-        msg, agg, notion, calib, week_start, week_end, archived_csv_files
+        msg,
+        agg,
+        notion,
+        calib,
+        week_start,
+        week_end,
+        archived_csv_files,
+        v13_gate,
     )
     print(f"🗂️  週報已永久保存:{', '.join(report_files)}")
 
