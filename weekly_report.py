@@ -34,7 +34,7 @@ from pathlib import Path
 import requests
 from config import Config
 from snapshot_schema import snapshot_data_rows, write_snapshot
-from trade_plan import strategy_config_hash
+from trade_plan import strategy_config_hash, universe_version
 
 try:
     from zoneinfo import ZoneInfo
@@ -553,7 +553,27 @@ def load_v13_calibration_gate(
         if completed >= minimum
         else "collecting"
     )
-    expected_allowed = completed >= minimum
+    # 母體一致性同樣是授權條件 —— SCAN_POOL 不在 ConfigHash 內,只靠 cohort
+    # identity 擋不住成分股異動造成的混合樣本。缺欄或形狀不對一律 fail closed,
+    # 不當作「沒問題」。
+    universe = summary.get("universe_cohort")
+    if not isinstance(universe, dict):
+        return _blocked_v13_gate(
+            "missing_universe_cohort",
+            "summary 未提供 universe_cohort;無法證明樣本出自單一母體",
+        )
+    universe_consistent = universe.get("consistent")
+    if not isinstance(universe_consistent, bool):
+        return _blocked_v13_gate("invalid_universe_cohort", f"actual={universe}")
+    if universe.get("current") != universe_version():
+        return _blocked_v13_gate(
+            "universe_version_mismatch",
+            f"expected={universe_version()}; actual={universe.get('current')}",
+        )
+
+    expected_allowed = completed >= minimum and (
+        universe_consistent or not Config.EPISODE_REQUIRE_SINGLE_UNIVERSE
+    )
     if (
         maturity.get("stage") != expected_status
         or maturity.get("parameter_tuning_allowed") is not expected_allowed
@@ -603,6 +623,10 @@ def load_v13_calibration_gate(
         "trade_plan_version": summary["trade_plan_version"],
         "measurement_version": summary["measurement_version"],
         "config_hash": cohort["config_hash"],
+        "universe_cohort": universe,
+        "blocked_by_universe": bool(
+            completed >= minimum and not expected_allowed
+        ),
         # 達標預估為純資訊,原樣帶過不參與任何授權判斷。它若缺漏或損壞,
         # 顯示端自行降級 —— 絕不能因為預估算不出來就擋掉一個已合格的閘門。
         "projection": (
@@ -844,6 +868,19 @@ def build_message(agg: dict, notion: dict, calib: dict,
             lines.append(
                 "  🟡 已達 60 筆全體門檻，可啟動參數分析；"
                 "各策略腿／order type 仍須各自滿 20 筆。"
+            )
+        elif v13_gate.get("blocked_by_universe"):
+            universe = v13_gate.get("universe_cohort") or {}
+            lines.append(
+                f"  ⛔ 樣本數已達 {v13_gate['minimum_completed']} 筆，"
+                "但選股母體不一致 —— 仍禁止調參。"
+            )
+            lines.append(
+                f"     原因 {universe.get('reason', 'unknown')}；"
+                f"cohort 內有 {universe.get('distinct', '?')} 套 UniverseVersion"
+            )
+            lines.append(
+                "     SCAN_POOL 不在 ConfigHash 內,需人工決定接受混合或重新起算。"
             )
         else:
             lines.append(

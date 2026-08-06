@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 
 from config import Config
-from trade_plan import strategy_config_hash
+from trade_plan import strategy_config_hash, universe_version
 from gate_projection import project_gate_completion
 
 
@@ -332,6 +332,37 @@ def _fmt_r(value: float | None) -> str:
     return "-" if value is None else f"{value:+.2f}"
 
 
+def _universe_markdown(universe: dict[str, Any] | None) -> list[str]:
+    """母體一致性。一致時一行帶過,不一致時把組成攤開讓人能決定怎麼處理。"""
+    if not universe:
+        return []
+    if universe.get("consistent"):
+        return [
+            "",
+            f"母體一致：{universe['current']}（cohort 內單一 UniverseVersion）",
+        ]
+
+    lines = [
+        "",
+        "## ⚠️ 母體不一致 —— 已禁止調參",
+        "",
+        f"- 原因：{universe.get('reason', 'unknown')}",
+        f"- 現行母體：{universe.get('current')}",
+        "",
+        "| UniverseVersion | episodes |",
+        "|---|---:|",
+    ]
+    for version, count in (universe.get("observed") or {}).items():
+        lines.append(f"| {version} | {count} |")
+    lines.extend([
+        "",
+        "> SCAN_POOL 不在 ConfigHash 內,改動它不會讓 cohort 歸零,卻會改變",
+        "> 主題觸發與 Top 10。混合母體的樣本不可用於調參 —— 請決定要接受",
+        "> 混合(需明確記錄理由)還是以新母體重新起算。",
+    ])
+    return lines
+
+
 def _projection_markdown(projection: dict[str, Any] | None) -> list[str]:
     """達標預估區塊。無法預估時明說原因,不留白也不假裝有數字。"""
     if not projection:
@@ -437,6 +468,7 @@ def _markdown(summary: dict[str, Any]) -> str:
                 f"{'yes' if row['tuning_ready'] else 'no'} |"
             )
 
+    lines.extend(_universe_markdown(summary.get("universe_cohort")))
     lines.extend(_projection_markdown(summary.get("projection")))
 
     lines.extend([
@@ -447,6 +479,65 @@ def _markdown(summary: dict[str, Any]) -> str:
         "",
     ])
     return "\n".join(lines)
+
+
+def _universe_cohort(episodes: pd.DataFrame) -> dict[str, Any]:
+    """檢查整個 cohort 是否出自同一套選股母體。
+
+    為什麼要獨立檢查:`SCAN_POOL` **不在** `strategy_config_hash()` 裡,所以
+    增刪成分股不會讓 cohort 歸零 —— 但它會改變主題觸發,進而改變**其他**
+    股票的分數與 Top 10(2026-07-28 的 REGN dry run 已證實這點)。結果是同
+    一份調參樣本混進兩套母體,而且原本沒有任何地方會發現。比歸零更糟,因為
+    歸零至少看得見。
+
+    `snapshot_health` 擋不到這件事:它比對的是「今天的快照 vs 今天的
+    SCAN_POOL」,兩者同時改動時一路綠燈。
+    """
+    current = universe_version()
+    if episodes is None or episodes.empty:
+        return {
+            "current": current,
+            "observed": {},
+            "distinct": 0,
+            "mixed": False,
+            "matches_current": True,
+            "consistent": True,
+            "reason": None,
+        }
+    if "UniverseVersion" not in episodes.columns:
+        # 欄位缺失無法證明一致 —— fail closed,不假設沒問題。
+        return {
+            "current": current,
+            "observed": {},
+            "distinct": 0,
+            "mixed": False,
+            "matches_current": False,
+            "consistent": False,
+            "reason": "universe_version_column_missing",
+        }
+
+    counts = episodes["UniverseVersion"].astype(str).value_counts()
+    observed = {str(key): int(value) for key, value in counts.items()}
+    distinct = len(observed)
+    mixed = distinct > 1
+    matches_current = distinct == 1 and next(iter(observed)) == current
+
+    if mixed:
+        reason = "multiple_universe_versions"
+    elif not matches_current:
+        reason = "universe_changed_since_cohort_start"
+    else:
+        reason = None
+
+    return {
+        "current": current,
+        "observed": observed,
+        "distinct": distinct,
+        "mixed": mixed,
+        "matches_current": matches_current,
+        "consistent": reason is None,
+        "reason": reason,
+    }
 
 
 def _safe_projection(
@@ -493,7 +584,13 @@ def build_episode_analysis(
         stage = "minimum_reached"
     else:
         stage = "collecting"
-    overall_ready = completed_r >= minimum_completed
+    # 樣本數夠**不等於**可以調參:cohort 內必須只有一套選股母體。
+    universe_cohort = _universe_cohort(episodes)
+    universe_ok = (
+        universe_cohort["consistent"]
+        or not Config.EPISODE_REQUIRE_SINGLE_UNIVERSE
+    )
+    overall_ready = completed_r >= minimum_completed and universe_ok
 
     leg_column = (
         "PlanSelectedLeg"
@@ -527,7 +624,12 @@ def build_episode_analysis(
             "remaining_to_target": max(target_completed - completed_r, 0),
             "stage": stage,
             "parameter_tuning_allowed": overall_ready,
+            # 樣本數已足、卻因母體混合而被擋下時,要能一眼看出是哪一種阻擋
+            "blocked_by_universe": (
+                completed_r >= minimum_completed and not universe_ok
+            ),
         },
+        "universe_cohort": universe_cohort,
         # 純資訊:預估何時達標。預估失敗絕不可影響授權判斷,故整段包起來,
         # 任何例外都降級為 projection_failed,閘門本身照常運作。
         "projection": _safe_projection(

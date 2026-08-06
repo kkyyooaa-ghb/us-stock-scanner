@@ -26,7 +26,7 @@ from weekly_report import (
     select_daily_artifacts,
     write_report_files,
 )
-from trade_plan import strategy_config_hash
+from trade_plan import strategy_config_hash, universe_version
 
 
 def _row(status, r=None, stop=False, dist="🎯 甜點價", gap=0):
@@ -67,11 +67,35 @@ def _aggregate():
     }
 
 
-def _v13_summary(completed=2, *, tuning_allowed=None):
+def _universe_cohort(consistent=True, *, current=None):
+    current = current or universe_version()
+    if consistent:
+        return {
+            "current": current,
+            "observed": {current: 30},
+            "distinct": 1,
+            "mixed": False,
+            "matches_current": True,
+            "consistent": True,
+            "reason": None,
+        }
+    return {
+        "current": current,
+        "observed": {current: 20, "ndx-98-deadbeefcafe": 10},
+        "distinct": 2,
+        "mixed": True,
+        "matches_current": False,
+        "consistent": False,
+        "reason": "multiple_universe_versions",
+    }
+
+
+def _v13_summary(completed=2, *, tuning_allowed=None, universe=None):
     minimum = Config.EPISODE_TUNING_MIN_COMPLETED
     target = Config.EPISODE_TUNING_TARGET
+    universe = _universe_cohort() if universe is None else universe
     if tuning_allowed is None:
-        tuning_allowed = completed >= minimum
+        tuning_allowed = completed >= minimum and universe["consistent"]
     if completed >= target:
         stage = "target_reached"
     elif completed >= minimum:
@@ -95,6 +119,7 @@ def _v13_summary(completed=2, *, tuning_allowed=None):
             "stage": stage,
             "parameter_tuning_allowed": tuning_allowed,
         },
+        "universe_cohort": universe,
         "by_selected_leg": [],
         "by_order_type": [],
     }

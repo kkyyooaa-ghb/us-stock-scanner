@@ -56,6 +56,12 @@ class Config:
     EPISODE_TUNING_MIN_COMPLETED = 60
     EPISODE_TUNING_TARGET        = 100
     EPISODE_SEGMENT_MIN_COMPLETED = 20
+    # 母體一致性閘門(2026-08-06)。SCAN_POOL 不在 strategy_config_hash 內,
+    # 改動它不會讓 cohort 歸零,卻會改變主題觸發與 Top 10 —— 等於同一個調參
+    # 樣本裡混進兩套選股母體,且原本無任何機制會察覺。NDX 每年 12 月重組,
+    # 正好落在累積期內。設為 True 時,cohort 內出現多個 UniverseVersion
+    # (或與現行母體不符)一律禁止調參,由人決定要接受混合還是重新起算。
+    EPISODE_REQUIRE_SINGLE_UNIVERSE = True
 
     # ========== API 金鑰 ==========
     NOTION_TOKEN     = os.environ.get("NOTION_TOKEN", "")

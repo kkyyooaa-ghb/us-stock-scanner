@@ -4,7 +4,7 @@ import pandas as pd
 
 from config import Config
 from episode_analysis import build_episode_analysis
-from trade_plan import strategy_config_hash
+from trade_plan import strategy_config_hash, universe_version
 
 
 def _row(
@@ -28,6 +28,7 @@ def _row(
         "V13MeasurementVersion": Config.SHADOW_MEASUREMENT_VERSION,
         "SignalEngineVersion": Config.SIGNAL_ENGINE_VERSION,
         "ConfigHash": strategy_config_hash(),
+        "UniverseVersion": universe_version(),
         "PlanSelectedLeg": leg,
         "SelectedLeg": leg,
         "OrderType": order_type,
