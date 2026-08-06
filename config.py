@@ -92,6 +92,120 @@ class Config:
         'WMT', 'XEL', 'ZS',
     ]
 
+    # ========== 公司英文名(V1.3 P0,LLM enrichment 新聞檢索用) ==========
+    # 只服務新聞檢索的 query 精準度,不進 strategy_config_hash 也不進
+    # universe_version — 對選股、分數、Top 10 與 cohort identity 完全中性。
+    #
+    # 為什麼需要:Tavily 以純 ticker 搜尋在美股歧義極高 —— APP、EA、ARM、
+    # MU、STX、LIN、FAST、KEY 這類代號同時是常用英文字或他義縮寫,只給
+    # ticker 會撈回完全無關的報導。公司名 + ticker 併用可大幅收斂。
+    #
+    # 維護:與 SCAN_POOL 同步。成分異動時兩份一起改;查無名稱者
+    # llm_enrichment 會 fallback 至純 ticker(不拋錯、不中斷掃描)。
+    COMPANY_NAMES = {
+        'AAPL':  'Apple',
+        'ABNB':  'Airbnb',
+        'ADBE':  'Adobe',
+        'ADI':   'Analog Devices',
+        'ADP':   'Automatic Data Processing',
+        'ADSK':  'Autodesk',
+        'AEP':   'American Electric Power',
+        'ALNY':  'Alnylam Pharmaceuticals',
+        'AMAT':  'Applied Materials',
+        'AMD':   'Advanced Micro Devices',
+        'AMGN':  'Amgen',
+        'AMZN':  'Amazon.com',
+        'APP':   'AppLovin',
+        'ARM':   'Arm Holdings',
+        'ASML':  'ASML Holding',
+        'AVGO':  'Broadcom',
+        'AXON':  'Axon Enterprise',
+        'BKNG':  'Booking Holdings',
+        'BKR':   'Baker Hughes',
+        'CDNS':  'Cadence Design Systems',
+        'CEG':   'Constellation Energy',
+        'CHTR':  'Charter Communications',
+        'CMCSA': 'Comcast',
+        'COST':  'Costco Wholesale',
+        'CPRT':  'Copart',
+        'CRWD':  'CrowdStrike',
+        'CSCO':  'Cisco Systems',
+        'CSX':   'CSX Corporation',
+        'CTAS':  'Cintas',
+        'CTSH':  'Cognizant Technology Solutions',
+        'DASH':  'DoorDash',
+        'DDOG':  'Datadog',
+        'DXCM':  'DexCom',
+        'EA':    'Electronic Arts',
+        'EXC':   'Exelon',
+        'FANG':  'Diamondback Energy',
+        'FAST':  'Fastenal',
+        'FER':   'Ferrovial',
+        'FTNT':  'Fortinet',
+        'GEHC':  'GE HealthCare',
+        'GILD':  'Gilead Sciences',
+        'GOOGL': 'Alphabet',
+        'HON':   'Honeywell',
+        'IDXX':  'IDEXX Laboratories',
+        'INSM':  'Insmed',
+        'INTC':  'Intel',
+        'INTU':  'Intuit',
+        'ISRG':  'Intuitive Surgical',
+        'KDP':   'Keurig Dr Pepper',
+        'KHC':   'Kraft Heinz',
+        'KLAC':  'KLA Corporation',
+        'LIN':   'Linde',
+        'LITE':  'Lumentum Holdings',
+        'LRCX':  'Lam Research',
+        'MAR':   'Marriott International',
+        'MCHP':  'Microchip Technology',
+        'MDLZ':  'Mondelez International',
+        'MELI':  'MercadoLibre',
+        'META':  'Meta Platforms',
+        'MNST':  'Monster Beverage',
+        'MPWR':  'Monolithic Power Systems',
+        'MRVL':  'Marvell Technology',
+        'MSFT':  'Microsoft',
+        # 2025 年由 MicroStrategy 更名為 Strategy;舊名在新聞中仍高度通用,
+        # 兩者併列可同時命中改名前後的報導。
+        'MSTR':  'Strategy (MicroStrategy)',
+        'MU':    'Micron Technology',
+        'NFLX':  'Netflix',
+        'NVDA':  'NVIDIA',
+        'NXPI':  'NXP Semiconductors',
+        'ODFL':  'Old Dominion Freight Line',
+        'ORLY':  "O'Reilly Automotive",
+        'PANW':  'Palo Alto Networks',
+        'PAYX':  'Paychex',
+        'PCAR':  'PACCAR',
+        'PDD':   'PDD Holdings',
+        'PEP':   'PepsiCo',
+        'PLTR':  'Palantir Technologies',
+        'PYPL':  'PayPal',
+        'QCOM':  'Qualcomm',
+        'REGN':  'Regeneron Pharmaceuticals',
+        'ROP':   'Roper Technologies',
+        'ROST':  'Ross Stores',
+        'SBUX':  'Starbucks',
+        'SHOP':  'Shopify',
+        'SNDK':  'SanDisk',
+        'SNPS':  'Synopsys',
+        'STX':   'Seagate Technology',
+        'TMUS':  'T-Mobile US',
+        'TRI':   'Thomson Reuters',
+        'TSLA':  'Tesla',
+        'TTWO':  'Take-Two Interactive',
+        'TXN':   'Texas Instruments',
+        'VRSK':  'Verisk Analytics',
+        'VRTX':  'Vertex Pharmaceuticals',
+        'WBD':   'Warner Bros. Discovery',
+        'WDAY':  'Workday',
+        'WDC':   'Western Digital',
+        'WMT':   'Walmart',
+        'XEL':   'Xcel Energy',
+        'ZS':    'Zscaler',
+    }
+
     # ========== 大盤指數 / 宏觀(D4, D5) ==========
     INDEX_TICKER            = "^GSPC"   # 主燈號指數(原 ^TWII 位)
     INDEX_TICKER_SECONDARY  = "^IXIC"   # 輔助(科技權重,池子主軸)
@@ -265,14 +379,19 @@ class Config:
     MIN_PRIORITY_FOR_GO = 7
     FINMIND_MAX_WORKERS = 5             # deprecated(US),保留避免引用崩潰
 
-    # ========== LLM enrichment(P7.5 原樣移植 — 架構沿用,新聞源換美股) ==========
-    # V1.3 P0:舊模組仍搜尋台股來源。修正 query builder 前預設停用,
-    # 避免錯市場新聞影響人工判斷；可用 env 顯式開啟的能力也一併關閉。
-    LLM_ENRICHMENT_ENABLED       = False
+    # ========== LLM enrichment(P7.5 — V1.3 P0 已完成美股化) ==========
+    # 2026-08-06:query builder、include_domains 與 prompt 全面改美股口徑
+    # (公司英文名 + ticker、美國財經媒體與新聞稿線、美股研究助手 prompt、
+    # ET 時區),原「搜台股來源」的停用理由消失,故重新啟用。
+    # 仍可用 env `LLM_ENRICHMENT_ENABLED=false` 即時快關,無需改碼重推。
+    LLM_ENRICHMENT_ENABLED       = True
     LLM_MODEL                    = "gemini-2.5-flash"
     LLM_NEWS_DAYS                = 3
     LLM_NEWS_MAX_RESULTS         = 5
-    LLM_ENRICHMENT_TOTAL_TIMEOUT = 180
+    # 180s 是台股版 5 檔的預算;美股 df_go 上限為 TOP_N_RECOMMENDED=10 檔,
+    # 以每檔 ~21s(Tavily+Gemini+Notion)估算需 ~210s,舊值會讓末尾 1~2 檔
+    # 靜默落入「整段超時」。300s 對 scan.yml 的 20 分鐘 job timeout 仍有大幅餘裕。
+    LLM_ENRICHMENT_TOTAL_TIMEOUT = 300
     LLM_SUMMARY_COLUMN           = "LLM 摘要"   # Notion 欄位名(新 DB 同名即可)
 
     # ========== 執行時段護欄(原 V13.8.7;改 ET 視窗) ==========

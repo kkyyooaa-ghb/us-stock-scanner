@@ -1,9 +1,30 @@
 """
-llm_enrichment.py — LLM 精選股深度摘要(V13.11.2 / P7.5)
+llm_enrichment.py — LLM 精選股深度摘要(V1.3 P0 美股化 / P7.5)
 
 設計理念:
-  09:25 規則型選股完成後,LLM 對精選 5 檔每檔產 200 字摘要,寫入 Notion。
-  規則型抓不到的維度(減持、業績預警、訂單、突發事件)由 LLM 補強。
+  09:00 ET 規則型選股完成後,LLM 對精選標的每檔產 200 字摘要,寫入 Notion。
+  規則型抓不到的維度(財測下修、SEC 調查、大單、突發事件)由 LLM 補強。
+
+================================================================
+V1.3 P0 改動(2026-08-06 美股化,原模組自台股版移植後從未改市場)
+================================================================
+  病灶:query 硬加「台股」、`include_domains` 全為台灣財經媒體
+  (cnyes/moneydj/udn 等)、prompt 自稱「台股研究助手」。對 NDX 成分股
+  近乎零命中,且撈到的少量結果是錯市場新聞,會污染人工判讀。因此
+  `Config.LLM_ENRICHMENT_ENABLED` 自 V1.3 起被設為 False,整段是死碼。
+
+  修法:
+    a) query 改 `公司英文名 (TICKER) stock news`;新增 Config.COMPANY_NAMES
+       解析 99 檔成分股名稱,查無則 fallback 純 ticker(不拋錯)
+    b) include_domains 改美國財經媒體 + 新聞稿線 + sec.gov
+    c) prompt 改美股研究助手:英文輸入、繁體中文輸出、美股風險/催化語彙,
+       並新增標的比對規則(美股 ticker 歧義高)
+    d) 時區 UTC+8 → ET,與 sources/snapshot_schema/weekly_report 一致
+    e) 重新啟用 LLM_ENRICHMENT_ENABLED;env 快關能力保留
+
+  選股中性:本模組只寫 Notion「LLM 摘要」欄,不參與分數、腿別、Top 10、
+  TradePlan 或每日 CSV 快照,亦不進 strategy_config_hash / universe_version。
+================================================================
 
 哲學:
   - 規則型優先,LLM 補充不取代:09:25 主流程零變更,本模組只在末段補摘要
@@ -36,14 +57,16 @@ V13.11.2 改動(2026-05-25 兩個邊界 bug 修正)
 ================================================================
 
 技術選型:
-  - LLM:Google Gemini 2.5 Flash(Free tier 1,500 RPD,5 檔/天 × 22 天/月 = 110 次,完全免費)
-  - 新聞:Tavily(免費 1,000 次/月,中文友善)
+  - LLM:Google Gemini 2.5 Flash(Free tier 1,500 RPD,≤10 檔/天 × 22 天/月
+    = 220 次,完全免費)
+  - 新聞:Tavily(免費 1,000 次/月;≤10 檔/天 × 22 天 = 220 次,在額度內)
   - SDK:google-genai(新版,舊 google-generativeai 已 deprecated)
   - Notion API:沿用既有 REST(不依賴 outputs.py)
 
 時間預算:
-  - 5 檔 × (Tavily 5s + Gemini 15s + Notion 1s) ≈ 105s
-  - 整段 timeout 預留 180s(3 分鐘)
+  - df_go 上限為 Config.TOP_N_RECOMMENDED = 10 檔
+  - 10 檔 × (Tavily 5s + Gemini 15s + Notion 1s) ≈ 210s
+  - 整段 timeout 預留 300s(scan.yml job timeout 為 20 分鐘,餘裕充足)
 
 環境變數:
   - GEMINI_API_KEY        (必需)
@@ -61,7 +84,8 @@ import re
 import json
 import time
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 from config import Config
@@ -76,15 +100,52 @@ NOTION_TIMEOUT    = 15
 TAVILY_TIMEOUT    = 10
 GEMINI_TIMEOUT    = 30
 
+# V1.3 P0:時區改 ET,與 sources/snapshot_schema/weekly_report 一致。
+#   本模組在 09:00 ET 盤前掃描末段執行,新聞也是美東時間發佈;沿用台股版的
+#   UTC+8 會讓「今天」與時效 cutoff 相對新聞來源整體平移 12~13 小時。
+ET_TZ = ZoneInfo("America/New_York")
+
 # V13.11.2:新聞日期硬過濾門檻(天)
-#   5/25 暴露:2882.TW 國泰金摘要返回 2023 Q2 舊聞,Tavily days=3 是「優先」不是「硬過濾」。
-#   14 天平衡:嚴一點避免舊聞,鬆一點容忍小型股一週沒新聞的情況。
+#   5/25 暴露:摘要返回 2023 Q2 舊聞,Tavily days=3 是「優先」不是「硬過濾」。
+#   14 天平衡:嚴一點避免舊聞,鬆一點容忍一週沒新聞的情況。
 #   published_date 缺失的新聞保留(信任 Tavily 預設過濾)。
 NEWS_MAX_AGE_DAYS = 14
 
+# V1.3 P0:美股新聞源。原清單為 cnyes/moneydj/udn 等台灣財經媒體,對美股
+# 標的近乎零命中。此處含三類來源:
+#   1. 主流財經媒體 — 一般報導與分析
+#   2. 新聞稿線(businesswire/prnewswire/globenewswire)— 財報、財測、
+#      大單、新品的第一手原文,正是 prompt 要抓的 risk/catalyst
+#   3. sec.gov — 8-K 重大事件與內部人交易
+US_NEWS_DOMAINS = [
+    "reuters.com", "cnbc.com", "bloomberg.com", "wsj.com",
+    "marketwatch.com", "barrons.com", "investors.com",
+    "finance.yahoo.com", "seekingalpha.com", "fool.com", "benzinga.com",
+    "businesswire.com", "prnewswire.com", "globenewswire.com",
+    "sec.gov",
+]
 
-def _now_tw_str() -> str:
-    return datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
+
+def _now_et() -> datetime:
+    return datetime.now(ET_TZ)
+
+
+def _now_et_str() -> str:
+    return _now_et().strftime('%Y-%m-%d %H:%M:%S ET')
+
+
+def _resolve_company_name(ticker: str, override: str = "") -> str:
+    """
+    解析公司英文名供新聞檢索使用。
+
+    優先序:呼叫端明確傳入 > Config.COMPANY_NAMES > 空字串(退回純 ticker)。
+    查不到名稱**不是錯誤** —— 成分股異動而 COMPANY_NAMES 尚未同步時,
+    仍應以純 ticker 搜尋,不可讓 P7.5 中斷主流程。
+    """
+    if override:
+        return override.strip()
+    names = getattr(Config, "COMPANY_NAMES", {}) or {}
+    return names.get(ticker.strip().upper(), "")
 
 
 def _is_enabled() -> bool:
@@ -103,34 +164,34 @@ def _is_enabled() -> bool:
 def get_news_for_stock_tavily(stock_id: str, stock_name: str = "",
                                days: int = 3, max_results: int = 5) -> dict:
     """
-    用 Tavily 抓近 N 天的中文新聞。
-    
+    用 Tavily 抓近 N 天的美股英文新聞。
+
     參數:
-      stock_id   : 股票代號(可含 .TW/.TWO 後綴,內部自動清理)
-      stock_name : 公司簡稱(可選,加進 query 提升精準度)
+      stock_id   : 美股 ticker(如 NVDA)
+      stock_name : 公司英文名(可選;留空則自 Config.COMPANY_NAMES 解析)
       days       : 近 N 天(預設 3)
       max_results: 結果上限(預設 5)
-    
+
     回傳:
       成功 → {"ok": True, "news": [{"title": "...", "content": "...", "url": "...", "published": "..."}, ...]}
       失敗 → {"ok": False, "err": "...", "news": []}
-    
+
     說明:
-      - Tavily 中文支援不錯,query 直接用中文
-      - 限制 include_domains 到台灣財經主流媒體,提升相關性
+      - V1.3 P0:query 與來源全面改美股。原版硬加「台股」並限制在台灣媒體,
+        對 NDX 成分股近乎零命中,是本模組被停用的直接原因。
+      - 公司名 + ticker 併用:純 ticker 在美股歧義過高(APP/EA/ARM/MU/STX
+        同時是常用英文字),加公司名可大幅收斂。
       - search_depth 用 "basic"(快、便宜),"advanced" 留給未來需要時升級
     """
     token = os.getenv("TAVILY_API_KEY", "")
     if not token:
         return {"ok": False, "err": "TAVILY_API_KEY 未設定", "news": []}
 
-    sid_clean = stock_id.replace(".TWO", "").replace(".TW", "")
-    query_parts = []
-    if stock_name:
-        query_parts.append(stock_name)
-    query_parts.append(sid_clean)
-    query_parts.append("台股")
-    query = " ".join(query_parts)
+    ticker = stock_id.strip().upper()
+    company = _resolve_company_name(ticker, stock_name)
+    # 「stock news」錨定財經語境,避免公司名撞到消費性產品或體育新聞
+    # (如 Apple、Amazon、Arm、Linde 的一般報導)。
+    query = f"{company} ({ticker}) stock news" if company else f"{ticker} stock news"
 
     payload = {
         "api_key":         token,
@@ -141,12 +202,7 @@ def get_news_for_stock_tavily(stock_id: str, stock_name: str = "",
         "max_results":     max_results,
         "include_answer":  False,
         "include_raw_content": False,
-        # 台灣主流財經媒體優先(可依實戰逐步擴充)
-        "include_domains": [
-            "cnyes.com", "moneydj.com", "ec.ltn.com.tw",
-            "udn.com", "ettoday.net", "businessweekly.com.tw",
-            "ctee.com.tw", "wealth.com.tw",
-        ],
+        "include_domains": list(US_NEWS_DOMAINS),
     }
 
     try:
@@ -165,18 +221,18 @@ def get_news_for_stock_tavily(stock_id: str, stock_name: str = "",
 
     # V13.11.2:程式端 published_date 二次硬過濾(超過 NEWS_MAX_AGE_DAYS 天硬丟)
     # published_date 缺失或解析失敗的保留(信任 Tavily 預設 days 過濾)
-    now_tw = datetime.now(timezone(timedelta(hours=8)))
-    cutoff = now_tw - timedelta(days=NEWS_MAX_AGE_DAYS)
+    now_et = _now_et()
+    cutoff = now_et - timedelta(days=NEWS_MAX_AGE_DAYS)
     kept, dropped = [], 0
     for r in raw_results:
         pub_str = r.get("published_date", "") or ""
         if pub_str:
             try:
-                # Tavily 通常回 ISO 8601 格式(如 2026-05-22T08:30:00Z 或 +0800)
+                # Tavily 通常回 ISO 8601 格式(如 2026-05-22T08:30:00Z 或 -04:00)
                 pub_dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
-                # 統一轉成 +08:00 比較
+                # 無時區者視為 ET(美股新聞來源的自然時區)
                 if pub_dt.tzinfo is None:
-                    pub_dt = pub_dt.replace(tzinfo=timezone(timedelta(hours=8)))
+                    pub_dt = pub_dt.replace(tzinfo=ET_TZ)
                 if pub_dt < cutoff:
                     dropped += 1
                     continue  # 超過 14 天硬丟
@@ -205,28 +261,32 @@ def get_news_for_stock_tavily(stock_id: str, stock_name: str = "",
 # ============================================================
 # 2. Gemini 摘要生成
 # ============================================================
-PROMPT_TEMPLATE = """你是台股研究助手。給定一檔股票 + 近期新聞,產出 200 字以內的中文摘要,嚴格分三段:
+PROMPT_TEMPLATE = """你是美股研究助手。給定一檔美股 + 近期新聞,產出 200 字以內的摘要,嚴格分三段:
 
-🚨 風險警示(0-2 條,每條 ≤ 30 字):減持公告、業績預警、監管調查、客戶事件、競品威脅。沒有則寫「無顯著風險」。
-✨ 利好催化(0-2 條,每條 ≤ 30 字):大單、業績暴增、新品上市、政策受惠、客戶擴張。沒有則寫「無顯著催化」。
+🚨 風險警示(0-2 條,每條 ≤ 30 字):財測下修、財報不如預期、SEC/監管調查、內部人賣股、大客戶流失、競品威脅、分析師降評、訴訟或召回。沒有則寫「無顯著風險」。
+✨ 利好催化(0-2 條,每條 ≤ 30 字):財報優於預期、財測上修、大單或新合約、新品發表、分析師升評、庫藏股或股利、併購與策略合作。沒有則寫「無顯著催化」。
 📢 最新動態(1 條,≤ 40 字):**以新聞日期最新的事件**為主,純客觀描述。
 
 **嚴格規則**:
 1. 只能根據下方提供的新聞,**禁止**杜撰或補充新聞外的資訊。
-2. **時效規則**:每條新聞前綴的 [N] YYYY-MM-DD 是發佈日期。
+2. **語言規則**:下方新聞為英文,但輸出一律使用**繁體中文**。公司名、產品名、
+   財務術語(如 EPS、guidance、buyback)可保留英文原文,不必硬翻。
+3. **時效規則**:每條新聞前綴的 [N] YYYY-MM-DD 是發佈日期(美東時間)。
    - **忽略日期早於 {cutoff_date} 的新聞**(視為舊聞,不可用於 risk/catalyst/highlight)。
    - 若所有新聞日期都早於 {cutoff_date},三段全部寫「近期無顯著事件」。
    - highlight 必須引用列表中**日期最新**的有效事件,不可挑舊聞當主摘要。
-3. 若新聞為空或全無關股票本身,三段全部寫「無相關新聞」。
-4. **輸出 minified JSON,絕對禁止換行、縮排、空格美化、markdown 標記、解釋文字**:
+4. **標的比對規則**:新聞須確實是關於下方【股票】那家公司。美股 ticker 歧義高,
+   若某條新聞只是提到同名產品、同名人物或另一家公司,視為無關而略過。
+5. 若新聞為空或全無關股票本身,三段全部寫「無相關新聞」。
+6. **輸出 minified JSON,絕對禁止換行、縮排、空格美化、markdown 標記、解釋文字**:
    {{"risk":["..."],"catalyst":["..."],"highlight":"..."}}
-5. risk/catalyst 為陣列(0~2 個元素);highlight 為單字串。
+7. risk/catalyst 為陣列(0~2 個元素);highlight 為單字串。
 
 【股票】{stock_name}({stock_id})
-【今日日期】{today_date}
+【今日日期】{today_date}(美東)
 【新聞時效門檻】不採用早於 {cutoff_date} 的事件
 
-【近期新聞(已過濾 {age_days} 天前舊聞)】
+【近期新聞(英文,已過濾 {age_days} 天前舊聞)】
 {news_block}
 
 請輸出 minified JSON(單行,無縮排):"""
@@ -317,12 +377,15 @@ def enrich_pick_with_gemini(stock_id: str, stock_name: str,
 
     news_block = _format_news_block(news_list)
     # V13.11.2:PROMPT 需要 today_date / cutoff_date 用於時效判斷
-    now_tw = datetime.now(timezone(timedelta(hours=8)))
-    today_date  = now_tw.strftime("%Y-%m-%d")
-    cutoff_date = (now_tw - timedelta(days=NEWS_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    # V1.3 P0:改 ET,與新聞來源和 repo 其餘時間欄位同基準
+    now_et = _now_et()
+    today_date  = now_et.strftime("%Y-%m-%d")
+    cutoff_date = (now_et - timedelta(days=NEWS_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    ticker  = stock_id.strip().upper()
+    company = _resolve_company_name(ticker, stock_name)
     prompt = PROMPT_TEMPLATE.format(
-        stock_name  = stock_name or "未知公司",
-        stock_id    = stock_id,
+        stock_name  = company or "未知公司",
+        stock_id    = ticker,
         today_date  = today_date,
         cutoff_date = cutoff_date,
         age_days    = NEWS_MAX_AGE_DAYS,
@@ -483,7 +546,7 @@ def run_llm_enrichment_phase(picks: list, scan_date: str) -> dict:
     參數:
       picks: list of dict, 每個 dict 必須含:
         - "stock_code" 或 "ticker"(優先取 stock_code,fallback ticker)
-        - "stock_name"(公司簡稱,可選)
+        - "stock_name"(公司英文名,可選;留空則自 Config.COMPANY_NAMES 解析)
       scan_date: "YYYY-MM-DD"(用於組 Notion Title)
     
     回傳統計 dict:
@@ -495,8 +558,8 @@ def run_llm_enrichment_phase(picks: list, scan_date: str) -> dict:
         "notion_fail":0,    # Notion 寫入失敗
         "elapsed_sec": 87.3,
         "details": [
-          {"stock_id": "2330.TW", "ok": True,  "summary_text": "..."},
-          {"stock_id": "2317.TW", "ok": False, "err": "..."},
+          {"stock_id": "NVDA", "ok": True,  "summary_text": "..."},
+          {"stock_id": "AMD",  "ok": False, "err": "..."},
           ...
         ]
       }
@@ -507,8 +570,8 @@ def run_llm_enrichment_phase(picks: list, scan_date: str) -> dict:
       print(f"  LLM enrichment 完成:{stats['success']}/{stats['total']}")
     """
     print("\n" + "=" * 65)
-    print(f"🤖 V13.11.2 P7.5 LLM 精選報告 enrichment")
-    print(f"   執行時間 :{_now_tw_str()}")
+    print(f"🤖 V1.3 P7.5 LLM 精選報告 enrichment(美股新聞源)")
+    print(f"   執行時間 :{_now_et_str()}")
     print(f"   掃描日期 :{scan_date}")
     print(f"   標的數量 :{len(picks)} 檔")
     print(f"   LLM 模型 :{Config.LLM_MODEL}")
@@ -543,7 +606,10 @@ def run_llm_enrichment_phase(picks: list, scan_date: str) -> dict:
             stats["details"].append({"ok": False, "err": "缺少 stock_code"})
             continue
 
-        print(f"\n  [{idx}/{len(picks)}] 🔍 {stock_id} {stock_name}")
+        # 呼叫端(main.py)不帶公司名;此處解析只為 log 可讀,實際檢索與
+        # prompt 各自再解析一次,行為一致。
+        resolved_name = _resolve_company_name(stock_id, stock_name)
+        print(f"\n  [{idx}/{len(picks)}] 🔍 {stock_id} {resolved_name or '(無公司名,以純 ticker 檢索)'}")
 
         # 整段超時護欄(避免單一階段 hang 住整支主程式)
         if time.time() - t_start > Config.LLM_ENRICHMENT_TOTAL_TIMEOUT:
