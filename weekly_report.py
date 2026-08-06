@@ -424,6 +424,39 @@ def legacy_v12_sample_complete(calib: dict) -> bool:
     return v12.get("n_r", 0) >= LEGACY_CALIBRATION_MIN_R
 
 
+def _v13_projection_lines(projection: dict | None) -> list[str]:
+    """閘門達標預估的週報呈現。
+
+    只顯示最低門檻那一格與區間 —— 週報是每週掃一眼的東西,細節留在
+    `reports/shadow_episode_summary.md`。預估不可得時明說,不留白。
+    """
+    if not isinstance(projection, dict):
+        return ["  📅 達標預估：無(episode summary 未提供)"]
+    if not projection.get("ok"):
+        return [f"  📅 達標預估：無法計算({projection.get('reason', 'unknown')})"]
+
+    milestone = (projection.get("milestones") or {}).get("minimum") or {}
+    if milestone.get("beyond_horizon") or not milestone.get("eta_date"):
+        return ["  📅 達標預估：以目前訊號率無法在預估視界內達標"]
+
+    basis = projection.get("basis") or {}
+    lines = [
+        f"  📅 預估達 {milestone['threshold']} 筆：<b>{milestone['eta_date']}</b>"
+        f"（約 {milestone['trading_days']} 個交易日）"
+    ]
+    low = milestone.get("eta_date_optimistic")
+    high = milestone.get("eta_date_pessimistic")
+    if low and high:
+        lines.append(f"     區間 {low} ～ {high}(信心度 {projection.get('confidence')})")
+    if basis:
+        lines.append(
+            f"     決定性管線 {basis.get('pipeline_open_episodes', '?')} 筆 + "
+            f"每掃描日新增 {basis.get('completions_per_scan_day', '?')} 筆完成"
+        )
+    lines.append("     ⚠️ 動到 ConfigHash 會讓 cohort 歸零,預估同步作廢")
+    return lines
+
+
 def _blocked_v13_gate(reason: str, detail: str = "") -> dict:
     """Return a machine-readable fail-closed V1.3 gate."""
     return {
@@ -570,6 +603,13 @@ def load_v13_calibration_gate(
         "trade_plan_version": summary["trade_plan_version"],
         "measurement_version": summary["measurement_version"],
         "config_hash": cohort["config_hash"],
+        # 達標預估為純資訊,原樣帶過不參與任何授權判斷。它若缺漏或損壞,
+        # 顯示端自行降級 —— 絕不能因為預估算不出來就擋掉一個已合格的閘門。
+        "projection": (
+            summary.get("projection")
+            if isinstance(summary.get("projection"), dict)
+            else None
+        ),
         **validated_segments,
     }
 
@@ -810,6 +850,7 @@ def build_message(agg: dict, notion: dict, calib: dict,
                 f"  🔒 尚差 {v13_gate['remaining_to_minimum']} 筆；"
                 "未達 60 前禁止調參。"
             )
+        lines.extend(_v13_projection_lines(v13_gate.get("projection")))
     else:
         reason = v13_gate.get("reason", "unknown")
         lines.append(f"  ⛔ V1.3 gate unavailable ({reason})")
@@ -982,7 +1023,8 @@ def write_report_files(message: str, agg: dict, notion: dict, calib: dict,
     )
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     snapshot = {
-        "schema_version": 3,
+        # 4:`v13_calibration_gate` 新增 `projection`(達標日預估,純資訊)。
+        "schema_version": 4,
         "generated_at_utc": generated_at,
         "period": {"start": week_start, "end": week_end, "timezone": "America/New_York"},
         "sources": {

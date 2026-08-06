@@ -14,6 +14,7 @@ import pandas as pd
 
 from config import Config
 from trade_plan import strategy_config_hash
+from gate_projection import project_gate_completion
 
 
 @dataclass(frozen=True)
@@ -331,6 +332,58 @@ def _fmt_r(value: float | None) -> str:
     return "-" if value is None else f"{value:+.2f}"
 
 
+def _projection_markdown(projection: dict[str, Any] | None) -> list[str]:
+    """達標預估區塊。無法預估時明說原因,不留白也不假裝有數字。"""
+    if not projection:
+        return []
+    if not projection.get("ok"):
+        return [
+            "",
+            "## 達標預估",
+            "",
+            f"無法預估：{projection.get('reason', 'unknown')}"
+            + (f"（{projection['detail']}）" if projection.get("detail") else ""),
+        ]
+
+    basis = projection["basis"]
+    lines = [
+        "",
+        "## 達標預估",
+        "",
+        f"- 基準日：{projection['as_of']}（信心度 {projection['confidence']}）",
+        f"- 已完成 R：{basis['completed_now']}；決定性管線（已成交未了結）："
+        f"{basis['pipeline_open_episodes']} 筆",
+        f"- 每掃描日新增 episode：{basis['arrivals_per_scan_day']}"
+        f"（Poisson 95% {basis['arrivals_rate_low']}～{basis['arrivals_rate_high']}）"
+        f"，觀察 {basis['observed_scan_days']} 個掃描日",
+        f"- 成交率 {basis['fill_rate']:.1%}；time exit "
+        f"{basis['time_exit_trading_days']} 個交易日",
+        f"- cohort 首日 backlog {basis['backlog_episodes_excluded']} 筆已排除，"
+        "不列入到達率",
+        "",
+        "| 里程碑 | 門檻 | 還差 | 交易日 | 預估日期 | 樂觀 | 保守 |",
+        "|---|---:|---:|---:|---|---|---|",
+    ]
+    for key, label in (("minimum", "最低"), ("target", "目標")):
+        m = projection["milestones"][key]
+        if m["beyond_horizon"]:
+            lines.append(
+                f"| {label} | {m['threshold']} | {m['remaining']} | "
+                "超出預估視界 | - | - | - |"
+            )
+            continue
+        lines.append(
+            f"| {label} | {m['threshold']} | {m['remaining']} | "
+            f"{m['trading_days']} | {m['eta_date'] or '-'} | "
+            f"{m['eta_date_optimistic'] or '-'} | {m['eta_date_pessimistic'] or '-'} |"
+        )
+
+    lines.append("")
+    for caveat in projection.get("caveats", []):
+        lines.append(f"> ⚠️ {caveat}")
+    return lines
+
+
 def _markdown(summary: dict[str, Any]) -> str:
     overall = summary["overall"]
     maturity = summary["maturity"]
@@ -384,6 +437,8 @@ def _markdown(summary: dict[str, Any]) -> str:
                 f"{'yes' if row['tuning_ready'] else 'no'} |"
             )
 
+    lines.extend(_projection_markdown(summary.get("projection")))
+
     lines.extend([
         "",
         f"> 本報告只使用 {summary['measurement_version']} episode；"
@@ -392,6 +447,24 @@ def _markdown(summary: dict[str, Any]) -> str:
         "",
     ])
     return "\n".join(lines)
+
+
+def _safe_projection(
+    episodes: pd.DataFrame,
+    *,
+    minimum_completed: int,
+    target_completed: int,
+) -> dict[str, Any]:
+    """閘門到達日預估。這是報告用資訊,不是授權依據 —— 絕不可讓它拋出例外
+    而中斷週報,也絕不可讓它的失敗改變 parameter_tuning_allowed。"""
+    try:
+        return project_gate_completion(
+            episodes,
+            minimum_completed=minimum_completed,
+            target_completed=target_completed,
+        )
+    except Exception as exc:  # noqa: BLE001 — 預估失敗必須降級而非中斷
+        return {"ok": False, "reason": "projection_failed", "detail": str(exc)}
 
 
 def build_episode_analysis(
@@ -455,6 +528,13 @@ def build_episode_analysis(
             "stage": stage,
             "parameter_tuning_allowed": overall_ready,
         },
+        # 純資訊:預估何時達標。預估失敗絕不可影響授權判斷,故整段包起來,
+        # 任何例外都降級為 projection_failed,閘門本身照常運作。
+        "projection": _safe_projection(
+            episodes,
+            minimum_completed=minimum_completed,
+            target_completed=target_completed,
+        ),
         "by_selected_leg": _segments(
             episodes,
             leg_column,

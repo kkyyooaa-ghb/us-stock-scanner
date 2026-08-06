@@ -62,12 +62,8 @@ class Config:
     NOTION_DB_ID     = os.environ.get("NOTION_DB_ID", "")     # ⚠️ 美股新 DB,勿沿用台股 DB
     TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-    # --- 相容保留(台股遺留,US 版不使用;留空避免舊碼 AttributeError) ---
-    FINMIND_TOKEN    = os.environ.get("FINMIND_TOKEN", "")    # deprecated(US)
-    TWELVEDATA_TOKEN = os.environ.get("TWELVEDATA_TOKEN", "") # deprecated(US)
-    FINMIND_URL      = ""                                      # deprecated(US)
-    TWELVEDATA_URL   = ""                                      # deprecated(US)
+    # 註:GEMINI_API_KEY / TAVILY_API_KEY 由 llm_enrichment.py 直接讀 env,
+    #     不在此鏡射,避免多一份會過期的副本。
 
     # ========== 掃描池:Nasdaq-100 快照(D1) ==========
     # ✅ 以使用者 2026-06-11 季營收 seed 名單為準(99 檔,即實際 NDX 成分)。
@@ -272,12 +268,8 @@ class Config:
     # 產業豁免:美股版先不豁免(台股豁免金融 YoY;美股金融多不在 NDX 內)
     REVENUE_EXCLUDED_STOCKS = set()
 
-    # --- 相容別名(舊碼引用 MONTH_REVENUE_* 不崩) ---
-    MONTH_REVENUE_CACHE_PATH        = QUARTER_REVENUE_CACHE_PATH
-    MONTH_REVENUE_CACHE_STALE_DAYS  = QUARTER_REVENUE_CACHE_STALE_DAYS
-    MONTH_REVENUE_YOY_TIERS         = QUARTER_REVENUE_YOY_TIERS
-    MONTH_REVENUE_EXCLUDED_STOCKS   = REVENUE_EXCLUDED_STOCKS
-    MONTH_REVENUE_COMBO_BONUS         = 1      # 組合拳保留(法人腿停用→實質不觸發)
+    # --- 組合拳(台股月營收位;法人腿停用→實質不觸發,但 analyzers 仍引用) ---
+    MONTH_REVENUE_COMBO_BONUS         = 1
     MONTH_REVENUE_COMBO_YOY_MIN       = 0.30
     MONTH_REVENUE_COMBO_INST_DAYS_MIN = 3
 
@@ -372,12 +364,13 @@ class Config:
     DATA_FALLBACK_ENABLED      = False
     DATA_MIN_BARS_PER_TICKER   = 50
     DATA_FALLBACK_MIN_RATIO    = 0.7
-    FINMIND_PRICE_HISTORY_DAYS = 130    # deprecated(US),保留避免引用崩潰
 
     # ========== 精選設定(原樣移植) ==========
     TOP_N_RECOMMENDED   = 10
     MIN_PRIORITY_FOR_GO = 7
-    FINMIND_MAX_WORKERS = 5             # deprecated(US),保留避免引用崩潰
+    # 法人批次併發數。US v1 的 get_institutional_batch 是零成本 stub,此值
+    # 目前不影響任何行為;保留呼叫是為了未來接上真實資料源時免改主流程。
+    INSTITUTIONAL_BATCH_MAX_WORKERS = 5
 
     # ========== LLM enrichment(P7.5 — V1.3 P0 已完成美股化) ==========
     # 2026-08-06:query builder、include_domains 與 prompt 全面改美股口徑
@@ -407,66 +400,13 @@ class Config:
     SCAN_NORMAL_ET_MIN_END    = 30
 
     # ════════════════════════════════════════════════════════════
-    # 以下為台股遺留常數(D2/D5/D6 停用區)。
-    # 保留定義 = 讓尚未移植完的 analyzers/main 在「降級模式」下可運行
-    # (對應 stub 一律回 ok=False / 空,該等分支自然不觸發)。
-    # 美股版 analyzers/main 完成後,本區可整段刪除。
+    # 台股遺留常數(D2/D5/D6 停用區)已於 2026-08-06 整段刪除。
+    #
+    # 原本保留是為了讓「尚未移植完的 analyzers/main」在降級模式下不會
+    # AttributeError。實測全 repo 靜態掃描:匯率、期現貨、除息、融資、
+    # 大盤開盤量結構共 40 個常數在 config.py 之外**零引用**,且全 repo
+    # 沒有任何 getattr(Config, ...) 動態取值,故刪除不影響任何分支。
+    #
+    # sources.py 的 D2/D5/D6 stub(get_margin_balance_5d_change 等)未動:
+    # 它們不讀這些常數,且 main.py 仍呼叫其中一支以保留未來接源的介面。
     # ════════════════════════════════════════════════════════════
-
-    # --- 匯率區(D5 停用) ---
-    FOREX_SIGNIFICANT_PCT     = 0.15
-    CENTRAL_BANK_DEFENSE_LINE = 32.0
-    FOREX_ASIA4_CURRENCIES    = ["USD", "CNY", "KRW", "JPY"]
-    FOREX_MAJOR_CURRENCIES    = ["USD", "CNY", "KRW"]
-    TWD_SURGE_THRESHOLD      = 0.03
-    TWD_PLUNGE_THRESHOLD     = 0.03
-    TWD_GAP_THRESHOLD        = 0.05
-    TWD_CUMULATIVE_THRESHOLD = 0.05
-    FOREX_5M_OUTPUTSIZE      = 60
-    SIGNAL_CUMULATIVE_THRESHOLD = {"USD": 0.05, "CNY": 0.005,
-                                   "KRW": 1.0,  "JPY": 0.08}
-    FOREX_L2_WINDOW_HM = ["09:00", "09:05", "09:10", "09:15"]
-    FOREX_L2_PRE_HM    = set()
-    FOREX_L2_OPEN_HM   = {"09:00", "09:05", "09:10", "09:15"}
-    FOREX_L2_API_START = "08:50:00"
-    FOREX_L2_API_END   = "09:20:00"
-    FOREX_NORMAL_HOUR_START = 6
-    FOREX_NORMAL_HOUR_END   = 9
-    FOREX_NORMAL_MIN_END    = 30
-    SIGNAL_MAJORITY_THRESHOLD = 3
-    SIGNAL_NOISE_THRESHOLD    = {"USD": 0.0, "CNY": 0.0, "KRW": 0.0, "JPY": 0.0}
-    SIGNAL_FALLBACK_TO_LAYER1 = True
-
-    # --- 期現貨區(D6 停用) ---
-    BASIS_THRESHOLD_PCT       = 0.005
-    BASIS_ALARM_PCT           = 0.015
-    FOREIGN_SHORT_WATCH_LEVEL = 30000
-    FOREIGN_SHORT_RED_LEVEL   = 50000
-    VOL_SURGE_RATIO           = 1.5
-
-    # --- 除息區(D6 停用) ---
-    EX_DIV_MIN_POINTS    = 5.0
-    EX_DIV_CALENDAR_PATH = "data/ex_div_calendar.json"
-    EX_DIV_COVERAGE_PCT  = 0.0
-    MAJOR_TAIEX_WEIGHTS  = {}
-
-    # --- 融資區(D6 停用) ---
-    MARGIN_BALANCE_CACHE_PATH       = "data/margin_balance_cache.json"
-    MARGIN_BALANCE_FETCH_DAYS       = 14
-    MARGIN_BALANCE_CACHE_STALE_DAYS = 3
-    MARGIN_BALANCE_TIERS = [
-        ( 0.05, "🔴", "融資爆衝", "散戶激進加碼,主力恐出貨"),
-        ( 0.03, "🟠", "融資快增", "高風險區,留意主力動向"),
-        ( 0.01, "🟡", "融資溫增", "散戶轉熱,適度減量"),
-        (-0.01, None, None,       None),
-        (-0.03, "🟢", "融資減量", "散戶撤退,中性偏多"),
-        (-1.00, "🟢", "融資崩跌", "散戶恐慌出清,可能築底"),
-    ]
-
-    # --- 大盤開盤量結構區(D2 方向A 停用;C 階段再啟用並改開盤後資料) ---
-    MIS_OPEN_VOLUME_CACHE_PATH        = "data/mis_open_volume.json"
-    MIS_OPEN_VOLUME_CACHE_STALE_HOURS = 4
-    VOL_STRUCTURE_SHRINK_RATIO        = 0.50
-    VOL_STRUCTURE_EXPAND_RATIO        = 0.15
-    VOL_STRUCTURE_HIGH_VOLUME_LOTS    = 999_999_999_999
-    VOL_STRUCTURE_NOT_FALLING_GAP_PCT = -0.1

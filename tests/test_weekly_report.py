@@ -521,11 +521,14 @@ class V13CalibrationGateTests(unittest.TestCase):
                 (report_root / "latest.json").read_text(encoding="utf-8")
             )
 
-        self.assertEqual(3, payload["schema_version"])
+        # 4:gate 新增 projection(達標日預估,純資訊)
+        self.assertEqual(4, payload["schema_version"])
         self.assertEqual(2, payload["v13_calibration_gate"]["completed_r"])
         self.assertFalse(
             payload["v13_calibration_gate"]["parameter_tuning_allowed"]
         )
+        # projection 欄位必須存在(可為 None),讓下游知道這版有這個概念
+        self.assertIn("projection", payload["v13_calibration_gate"])
 
     def test_refresh_runs_shadow_then_episode_after_daily_archive_exists(self):
         with tempfile.TemporaryDirectory() as tmp:

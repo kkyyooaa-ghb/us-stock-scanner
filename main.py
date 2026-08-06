@@ -242,7 +242,7 @@ def run_scanner():
     inst_cache = get_institutional_batch(
         Config.SCAN_POOL,
         days=10,
-        max_workers=Config.FINMIND_MAX_WORKERS,
+        max_workers=Config.INSTITUTIONAL_BATCH_MAX_WORKERS,
     )
 
     # 個股掃描迴圈
