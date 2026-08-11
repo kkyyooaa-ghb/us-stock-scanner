@@ -16,6 +16,7 @@ sys.modules.setdefault("requests", types.SimpleNamespace())
 import weekly_report
 from snapshot_schema import SNAPSHOT_COLUMNS, write_failure_snapshot
 from weekly_report import (
+    aggregate,
     build_message,
     calibration_engine,
     legacy_v12_sample_complete,
@@ -65,6 +66,54 @@ def _aggregate():
         "warn_regulars": [],
         "dip": {"available": False},
     }
+
+
+class TopFiveOnlyListsActionableNames(unittest.TestCase):
+    """2026-08-05 的 EA 以全週最高分 19.83 排在 Top5 首位,卻無腿別、
+    無交易計畫、Priority=1。掛在「本週最高分」下會被誤讀為最佳標的。"""
+
+    def _day(self, rows):
+        return [("2026-08-05", pd.DataFrame(rows))]
+
+    def _row(self, ticker, priority, score, leg):
+        return {
+            "Ticker": ticker, "Priority": priority, "Score": score,
+            "DistTag": "🎯 甜點價", "YoY": 0.1, "SelectedLeg": leg,
+        }
+
+    def test_high_score_without_a_leg_is_excluded(self):
+        days = self._day([
+            self._row("EA", 1, 19.83, "none"),
+            self._row("CEG", 16, 16.5, "consolidation_dip"),
+            self._row("AVGO", 15, 15.7, "consolidation_dip"),
+        ])
+        top5 = aggregate(days)["top5"]
+        self.assertNotIn("EA", [r["Ticker"] for r in top5])
+        self.assertEqual(top5[0]["Ticker"], "CEG")
+
+    def test_actionable_names_keep_score_ordering(self):
+        days = self._day([
+            self._row("CEG", 16, 16.5, "consolidation_dip"),
+            self._row("ALNY", 13, 15.5, "oversold_bounce"),
+        ])
+        top5 = aggregate(days)["top5"]
+        self.assertEqual([r["Ticker"] for r in top5], ["CEG", "ALNY"])
+
+    def test_missing_column_does_not_filter_old_snapshots(self):
+        """舊 schema 沒有 SelectedLeg —— 無從判斷就不過濾,不臆測。"""
+        frame = pd.DataFrame([{
+            "Ticker": "OLD", "Priority": 9, "Score": 11.0,
+            "DistTag": "🎯 甜點價", "YoY": 0.1,
+        }])
+        top5 = aggregate([("2026-07-20", frame)])["top5"]
+        self.assertEqual([r["Ticker"] for r in top5], ["OLD"])
+
+    def test_all_unactionable_falls_back_rather_than_empty(self):
+        days = self._day([
+            self._row("EA", 1, 19.83, "none"),
+            self._row("XYZ", 2, 12.0, "none"),
+        ])
+        self.assertTrue(aggregate(days)["top5"])
 
 
 def _universe_cohort(consistent=True, *, current=None):

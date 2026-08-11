@@ -134,6 +134,50 @@ def _now_et_str() -> str:
     return _now_et().strftime('%Y-%m-%d %H:%M:%S ET')
 
 
+# Gemini 重試設定。2026-08-10 唯一一筆缺漏是 503 UNAVAILABLE(模型暫時
+# 過載)—— 那是可重試錯誤,卻被當成永久失敗直接放棄該檔。
+GEMINI_MAX_ATTEMPTS = 3
+GEMINI_RETRY_BACKOFF_SEC = (2, 5)
+
+# 只重試「稍後會好」的錯誤。金鑰錯誤、權限不足、配額用罄、請求格式錯誤
+# 重試再多次也一樣,重試只會白白吃掉整段時間預算。
+_RETRYABLE_MARKERS = (
+    "503", "unavailable", "500", "internal",
+    "429", "resource_exhausted", "rate limit", "overloaded",
+    "timeout", "timed out", "deadline",
+    "connection", "temporarily",
+)
+
+
+def _is_retryable(error: Exception) -> bool:
+    text = f"{type(error).__name__} {error}".lower()
+    # 配額用罄雖然常伴隨 429,但當日不會恢復,重試無益
+    if "quota" in text and "exceeded" in text:
+        return False
+    return any(marker in text for marker in _RETRYABLE_MARKERS)
+
+
+def _call_with_retry(call, *, label: str = ""):
+    """對可重試的 Gemini 錯誤做退避重試;不可重試者立即拋出。"""
+    last: Exception | None = None
+    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
+        try:
+            return call()
+        except Exception as exc:  # noqa: BLE001 — 需依錯誤內容決定是否重試
+            last = exc
+            if attempt >= GEMINI_MAX_ATTEMPTS or not _is_retryable(exc):
+                raise
+            delay = GEMINI_RETRY_BACKOFF_SEC[
+                min(attempt - 1, len(GEMINI_RETRY_BACKOFF_SEC) - 1)
+            ]
+            print(
+                f"    ⏳ Gemini 暫時性失敗({label},第 {attempt} 次):{exc};"
+                f"{delay}s 後重試"
+            )
+            time.sleep(delay)
+    raise last  # pragma: no cover — 迴圈必定 return 或 raise
+
+
 def _resolve_company_name(ticker: str, override: str = "") -> str:
     """
     解析公司英文名供新聞檢索使用。
@@ -277,7 +321,16 @@ PROMPT_TEMPLATE = """你是美股研究助手。給定一檔美股 + 近期新�
    - highlight 必須引用列表中**日期最新**的有效事件,不可挑舊聞當主摘要。
 4. **標的比對規則**:新聞須確實是關於下方【股票】那家公司。美股 ticker 歧義高,
    若某條新聞只是提到同名產品、同名人物或另一家公司,視為無關而略過。
-5. 若新聞為空或全無關股票本身,三段全部寫「無相關新聞」。
+5. **非事件排除規則**:下列**不算**風險或催化,一律不得寫入:
+   - **純價格波動**:「股價下跌 10%」「上月跌 29.78%」「創新高」這類只描述
+     漲跌幅的敘述。掃描器已知道價格。除非新聞明確指出**造成**該波動的事件,
+     才寫那個事件本身,而不是寫漲跌幅。
+   - **平台上架與衍生商品**:加密貨幣代幣化股票、券商/交易所新增該標的、
+     ETF 成分調整、選擇權上市等,與公司基本面無關。
+   - **泛泛評論與預測性標題**:「該買嗎」「值得關注」「五檔必買股」這類
+     內容農場式標題,以及沒有具體事件的分析師隨筆。
+   - **過期重述**:只是回顧早於時效門檻之事件的整理文。
+6. 若新聞為空、全無關股票本身,或全被上條排除,三段全部寫「無相關新聞」。
 6. **輸出 minified JSON,絕對禁止換行、縮排、空格美化、markdown 標記、解釋文字**:
    {{"risk":["..."],"catalyst":["..."],"highlight":"..."}}
 7. risk/catalyst 為陣列(0~2 個元素);highlight 為單字串。
@@ -392,9 +445,9 @@ def enrich_pick_with_gemini(stock_id: str, stock_name: str,
         news_block  = news_block,
     )
 
-    try:
+    def _call_once():
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
+        return client.models.generate_content(
             model    = Config.LLM_MODEL,
             contents = prompt,
             config   = genai_types.GenerateContentConfig(
@@ -408,6 +461,9 @@ def enrich_pick_with_gemini(stock_id: str, stock_name: str,
                 response_mime_type = "application/json",  # 強制 JSON 輸出
             ),
         )
+
+    try:
+        response = _call_with_retry(_call_once, label=ticker)
         raw_text = response.text or ""
     except Exception as e:
         return {"ok": False, "err": f"Gemini 呼叫失敗:{e}", "summary_text": ""}

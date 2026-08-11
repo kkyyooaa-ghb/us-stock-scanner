@@ -320,5 +320,92 @@ class JsonExtraction(unittest.TestCase):
         self.assertIsNone(llm_enrichment._extract_json_from_response(""))
 
 
+class GeminiRetriesTransientFailures(unittest.TestCase):
+    """2026-08-10 唯一一筆缺漏是 503 UNAVAILABLE —— 可重試錯誤被當成永久失敗。"""
+
+    def test_transient_errors_are_retryable(self):
+        for message in (
+            "503 UNAVAILABLE. This model is currently experiencing high demand.",
+            "429 RESOURCE_EXHAUSTED",
+            "500 Internal error",
+            "Read timed out",
+            "Connection aborted",
+            "The service is temporarily overloaded",
+        ):
+            with self.subTest(message=message):
+                self.assertTrue(llm_enrichment._is_retryable(Exception(message)))
+
+    def test_permanent_errors_are_not_retryable(self):
+        """重試金鑰或格式錯誤只會白吃掉整段時間預算。"""
+        for message in (
+            "401 API key not valid",
+            "400 INVALID_ARGUMENT",
+            "403 PERMISSION_DENIED",
+            "429 Quota exceeded for this project",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(llm_enrichment._is_retryable(Exception(message)))
+
+    def test_retry_eventually_succeeds(self):
+        attempts = []
+
+        def flaky():
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise RuntimeError("503 UNAVAILABLE")
+            return "ok"
+
+        with mock.patch.object(llm_enrichment.time, "sleep"):
+            result = llm_enrichment._call_with_retry(flaky, label="TEST")
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(len(attempts), 3)
+
+    def test_permanent_error_is_not_retried(self):
+        attempts = []
+
+        def broken():
+            attempts.append(1)
+            raise RuntimeError("401 API key not valid")
+
+        with mock.patch.object(llm_enrichment.time, "sleep"), \
+                self.assertRaises(RuntimeError):
+            llm_enrichment._call_with_retry(broken, label="TEST")
+
+        self.assertEqual(len(attempts), 1)
+
+    def test_retry_gives_up_after_max_attempts(self):
+        attempts = []
+
+        def always_down():
+            attempts.append(1)
+            raise RuntimeError("503 UNAVAILABLE")
+
+        with mock.patch.object(llm_enrichment.time, "sleep"), \
+                self.assertRaises(RuntimeError):
+            llm_enrichment._call_with_retry(always_down, label="TEST")
+
+        self.assertEqual(len(attempts), llm_enrichment.GEMINI_MAX_ATTEMPTS)
+
+
+class PromptExcludesNonEvents(unittest.TestCase):
+    """8/7~8/10 抽查發現摘要把純價格波動與平台上架當成風險/催化。"""
+
+    def test_price_action_is_excluded(self):
+        self.assertIn("純價格波動", llm_enrichment.PROMPT_TEMPLATE)
+
+    def test_tokenised_stock_listings_are_excluded(self):
+        prompt = llm_enrichment.PROMPT_TEMPLATE
+        self.assertIn("代幣化", prompt)
+        self.assertIn("ETF 成分調整", prompt)
+
+    def test_content_farm_headlines_are_excluded(self):
+        self.assertIn("內容農場", llm_enrichment.PROMPT_TEMPLATE)
+
+    def test_all_excluded_still_yields_a_valid_answer(self):
+        """全被排除時要說「無相關新聞」,不是硬湊。"""
+        self.assertIn("全被上條排除", llm_enrichment.PROMPT_TEMPLATE)
+
+
 if __name__ == "__main__":
     unittest.main()

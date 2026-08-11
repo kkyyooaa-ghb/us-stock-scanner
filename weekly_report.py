@@ -212,13 +212,29 @@ def aggregate(days: list[tuple[str, "pd.DataFrame"]]) -> dict:
     frames = []
     for et_date, df in days:
         sub = df[["Ticker", "Priority", "Score", "DistTag", "YoY"]].copy()
+        # 舊 schema 歸檔的 CSV 沒有 SelectedLeg;缺欄時填 NA 代表「無從判斷」,
+        # 下方只排除明確為 none 者,不對舊資料臆測。
+        sub["SelectedLeg"] = (
+            df["SelectedLeg"] if "SelectedLeg" in df.columns else pd.NA
+        )
         sub["date"] = et_date
         frames.append(sub)
     allw = pd.concat(frames, ignore_index=True)
     allw["Score"] = pd.to_numeric(allw["Score"], errors="coerce").fillna(0)
     allw["Priority"] = pd.to_numeric(allw["Priority"], errors="coerce").fillna(0)
-    idx = allw.groupby("Ticker")["Score"].idxmax()
-    best = allw.loc[idx].sort_values("Score", ascending=False)
+
+    # Top5 只列實際觸發腿別者。2026-08-05 的 EA 以全週最高分 19.83 排在
+    # 首位,卻是 SelectedLeg=none、Priority=1、無交易計畫 —— 掛在「本週
+    # 最高分」底下會讓人誤以為那是最佳標的。Score 高而無腿別不是錯,只是
+    # 不可執行,不該佔用這個版位。
+    leg_text = allw["SelectedLeg"].astype(str).str.strip().str.lower()
+    not_actionable = allw["SelectedLeg"].notna() & leg_text.isin({"none", ""})
+    candidates = allw.loc[~not_actionable]
+    if candidates.empty:
+        candidates = allw
+
+    idx = candidates.groupby("Ticker")["Score"].idxmax()
+    best = candidates.loc[idx].sort_values("Score", ascending=False)
     top5 = best.head(5).to_dict("records")
 
     # 6 分常客(差 1 分達門檻,門檻定值的關鍵素材)
