@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-08-08 13:38:28",
+ "generated_at": "2026-08-15 13:23:00",
  "source": "yfinance quarterly_income_stmt",
  "stocks": {
   "AAPL": {
@@ -27,9 +27,9 @@
    "quarters": 5
   },
   "ADP": {
-   "yoy": 0.0695,
-   "latest_revenue": 5939200000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.0677,
+   "latest_revenue": 5473800000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "ADSK": {
@@ -57,15 +57,15 @@
    "quarters": 5
   },
   "AMD": {
-   "yoy": 0.3785,
-   "latest_revenue": 10253000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.5011,
+   "latest_revenue": 11536000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "AMGN": {
-   "yoy": 0.0576,
-   "latest_revenue": 8618000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.0953,
+   "latest_revenue": 10054000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "AMZN": {
@@ -99,9 +99,9 @@
    "quarters": 5
   },
   "AXON": {
-   "yoy": 0.3375,
-   "latest_revenue": 807345000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.3528,
+   "latest_revenue": 904389000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "BKNG": {
@@ -243,9 +243,9 @@
    "quarters": 5
   },
   "GILD": {
-   "yoy": 0.0439,
-   "latest_revenue": 6960000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.102,
+   "latest_revenue": 7803000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "GOOGL": {
@@ -261,15 +261,15 @@
    "quarters": 5
   },
   "IDXX": {
-   "yoy": 0.1426,
-   "latest_revenue": 1140820000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.0966,
+   "latest_revenue": 1216585000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "INSM": {
-   "yoy": 2.2962,
-   "latest_revenue": 305964000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 2.9611,
+   "latest_revenue": 425486000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "INTC": {
@@ -303,9 +303,9 @@
    "quarters": 5
   },
   "KLAC": {
-   "yoy": 0.1149,
-   "latest_revenue": 3415078000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.1521,
+   "latest_revenue": 3657556000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "LIN": {
@@ -321,9 +321,9 @@
    "quarters": 5
   },
   "LRCX": {
-   "yoy": 0.2376,
-   "latest_revenue": 5841488000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.2999,
+   "latest_revenue": 6722238000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "MAR": {
@@ -333,9 +333,9 @@
    "quarters": 5
   },
   "MCHP": {
-   "yoy": 0.3511,
-   "latest_revenue": 1311200000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.3805,
+   "latest_revenue": 1484700000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "MDLZ": {
@@ -345,9 +345,9 @@
    "quarters": 5
   },
   "MELI": {
-   "yoy": 0.4903,
-   "latest_revenue": 8845000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.4976,
+   "latest_revenue": 10169000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "META": {
@@ -357,15 +357,15 @@
    "quarters": 5
   },
   "MNST": {
-   "yoy": 0.2689,
-   "latest_revenue": 2353291000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.2017,
+   "latest_revenue": 2537473000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "MPWR": {
-   "yoy": 0.2614,
-   "latest_revenue": 804185000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.4756,
+   "latest_revenue": 980642000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "MRVL": {
@@ -411,15 +411,15 @@
    "quarters": 5
   },
   "ODFL": {
-   "yoy": -0.0292,
-   "latest_revenue": 1334696000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.1039,
+   "latest_revenue": 1554004000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "ORLY": {
-   "yoy": 0.1024,
-   "latest_revenue": 4560539000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.0811,
+   "latest_revenue": 4892013000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "PANW": {
@@ -525,9 +525,9 @@
    "quarters": 5
   },
   "TRI": {
-   "yoy": 0.0984,
-   "latest_revenue": 2087000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.0947,
+   "latest_revenue": 1954000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "TSLA": {
@@ -537,9 +537,9 @@
    "quarters": 5
   },
   "TTWO": {
-   "yoy": 0.0615,
-   "latest_revenue": 1679800000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.02,
+   "latest_revenue": 1533900000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "TXN": {
@@ -561,9 +561,9 @@
    "quarters": 5
   },
   "WBD": {
-   "yoy": -0.0096,
-   "latest_revenue": 8893000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": -0.1116,
+   "latest_revenue": 8717000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "WDAY": {
