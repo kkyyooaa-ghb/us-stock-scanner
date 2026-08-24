@@ -95,11 +95,12 @@ jobs:
               per_page: 30,
             });
 
-            const healthy = data.workflow_runs.find((run) => {
-              const isToday = Date.parse(run.created_at) >= cutoff;
-              const notFinished = run.status !== "completed";
-              return isToday && (notFinished || run.conclusion === "success");
-            });
+            const todayRuns = data.workflow_runs.filter(
+              (run) => Date.parse(run.created_at) >= cutoff
+            );
+            const healthy = todayRuns.find((run) =>
+              run.status !== "completed" || run.conclusion === "success"
+            );
 
             if (healthy) {
               core.info(
@@ -108,6 +109,39 @@ jobs:
               );
               core.setOutput("dispatched", "false");
               return `healthy:${healthy.id}`;
+            }
+
+            const retryableFailures = [];
+            for (const run of todayRuns) {
+              if (run.status !== "completed" || run.conclusion === "success") {
+                continue;
+              }
+              const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                owner,
+                repo,
+                run_id: run.id,
+                per_page: 20,
+              });
+              const retryable = artifacts.data.artifacts.some((artifact) =>
+                artifact.name.startsWith(`scan-result-${run.id}-`) &&
+                artifact.name.endsWith("-blocked-true")
+              );
+              if (retryable) retryableFailures.push(run);
+            }
+
+            if (todayRuns.length > 0 && retryableFailures.length === 0) {
+              core.warning(
+                "今日掃描失敗，但沒有 retryable health artifact；" +
+                "為避免重播 outbound publication，不自動補跑"
+              );
+              core.setOutput("dispatched", "false");
+              return "failed:non-retryable";
+            }
+
+            if (todayRuns.length >= 2) {
+              core.warning("今日 health-aware 補跑已用盡（最多一次），不再觸發");
+              core.setOutput("dispatched", "false");
+              return "failed:retry-limit-reached";
             }
 
             if (process.env.ALLOW_DISPATCH !== "true") {
@@ -126,7 +160,11 @@ jobs:
                 force_run: "false",
               },
             });
-            core.warning("主觸發缺跑或失敗，已用 watchdog 補觸發 scan.yml");
+            core.warning(
+              todayRuns.length === 0
+                ? "主觸發缺跑，已用 watchdog 補觸發 scan.yml"
+                : "主掃描被 retryable health contract 擋下，已補觸發一次 scan.yml"
+            );
             core.setOutput("dispatched", "true");
             return "fallback:dispatched";
 

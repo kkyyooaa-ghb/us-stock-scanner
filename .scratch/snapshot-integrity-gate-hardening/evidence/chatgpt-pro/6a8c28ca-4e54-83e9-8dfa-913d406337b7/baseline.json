@@ -1,0 +1,10 @@
+{
+  "repository": "kkyyooaa-ghb/us-stock-scanner",
+  "branch": "origin/main",
+  "commit": "900fa2640bff4c6f55f2a5c0623b25580c033a0f",
+  "source_zip": "us-stock-scanner-progress-review-900fa26.zip",
+  "source_zip_bytes": 234474,
+  "source_zip_files": 59,
+  "source_zip_sha256": "553a660d919f050cbc5ee22311a1c1e93b560d6988dad473efd8bcc5c412b54e",
+  "worktree_branch": "codex/snapshot-integrity-gate-hardening"
+}

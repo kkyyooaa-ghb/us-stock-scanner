@@ -1,0 +1,48 @@
+2026-08-24 ChatGPT Pro final review round 1
+
+Verdict: CHANGES_REQUIRED. Decision B reaffirmed.
+
+Blocking findings:
+1. B1: authoritative daily health sidecar must take precedence over stale inline health.
+2. B2: missing-health legacy fallback requires an explicit policy cutover; current-policy absence must fail closed.
+3. B3: unknown PlanSelectedLeg/OrderType levels must not become eligible or authorized tuning findings.
+
+Codex corrections:
+- B1 fixed with sidecar-first resolution and 8/18 regression coverage.
+- B2 fixed with shared 2026-08-22 cutover and post-policy missing-health tests.
+- B3 fixed with formal-scope hypothesis filtering while retaining descriptive rows.
+- Verification after corrections: tuning 21 passed; targeted 113 passed; full 264 passed.
+- Packaging correction pending: regenerate standalone patch including all untracked files.
+
+2026-08-24 ChatGPT Pro final review round 2
+
+Verdict: CHANGES_REQUIRED on one new bounded path, B4. B1/B2/B3 and Decision B
+were accepted.
+
+B4 finding: a day-level archived sidecar was applied to every Actions artifact
+for that date. On a weekly rerun, a later blocked run could borrow the selected
+run's usable sidecar, win the timestamp tiebreak, and split weekly statistics
+from the create-only daily archive used by shadow rebuild.
+
+Codex correction:
+- Pre-policy candidates keep curated sidecar-first behavior for historical fixes.
+- Post-policy candidates use their own inline run health; absent inline health fails closed.
+- Added both-direction sidecar/inline precedence tests plus a missing-inline test.
+- Verification after correction: weekly 38 passed; targeted 116 passed; full 267 passed.
+
+2026-08-24 ChatGPT Pro final review round 3
+
+Verdict: ACCEPT_WITH_NONBLOCKING. Blocking findings: NONE. All 1–7 items ACCEPT.
+
+B4 was accepted as fixed: post-policy Actions candidates use their own inline
+run health, cannot borrow a daily archive sidecar, and missing inline health
+fails closed. The pre-policy 8/18 historical sidecar override remains valid.
+
+Non-blocking notes only:
+- Pre-policy curated-sidecar identity is convention, not machine provenance.
+- The weekly module header still describes last-artifact selection rather than
+  usable -> session quality -> timestamp ranking.
+- Health JSON could defensively reject blocked status paired with eligible=true.
+
+Final Decision B reaffirmed: 60 global analysis review; formal segments each
+independently 20; 100 power/CI review; parameter_change_authorized=false.

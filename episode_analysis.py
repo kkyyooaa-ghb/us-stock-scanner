@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from typing import Any
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -35,6 +35,16 @@ EPISODE_COLUMNS = (
     "EpisodeObservedLegs",
     "EpisodeObservedOrderTypes",
     "EpisodeIsActive",
+)
+
+TUNING_SCOPE_SELECTED_LEGS = (
+    "consolidation_dip",
+    "healthy_pullback",
+    "oversold_bounce",
+)
+TUNING_SCOPE_ORDER_TYPES = (
+    "buy_limit_zone",
+    "buy_stop_reclaim",
 )
 
 
@@ -275,19 +285,25 @@ def _segments(
     *,
     overall_ready: bool,
     segment_min_completed: int,
+    tuning_scope: Iterable[str],
 ) -> list[dict[str, Any]]:
     if episodes.empty or column not in episodes:
         return []
     output = []
+    allowed_segments = set(tuning_scope)
     labels = episodes[column].fillna("unknown").astype(str)
     for label, group in episodes.groupby(labels, sort=True):
         metrics = _metrics(group)
+        segment = label or "unknown"
+        in_tuning_scope = segment in allowed_segments
         output.append({
-            "segment": label or "unknown",
+            "segment": segment,
             **metrics,
             "segment_min_completed": segment_min_completed,
+            "in_tuning_scope": in_tuning_scope,
             "tuning_ready": bool(
                 overall_ready
+                and in_tuning_scope
                 and metrics["completed_r"] >= segment_min_completed
             ),
         })
@@ -545,6 +561,7 @@ def _safe_projection(
     *,
     minimum_completed: int,
     target_completed: int,
+    observed_scan_dates: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """閘門到達日預估。這是報告用資訊,不是授權依據 —— 絕不可讓它拋出例外
     而中斷週報,也絕不可讓它的失敗改變 parameter_tuning_allowed。"""
@@ -553,6 +570,7 @@ def _safe_projection(
             episodes,
             minimum_completed=minimum_completed,
             target_completed=target_completed,
+            observed_scan_dates=observed_scan_dates,
         )
     except Exception as exc:  # noqa: BLE001 — 預估失敗必須降級而非中斷
         return {"ok": False, "reason": "projection_failed", "detail": str(exc)}
@@ -564,6 +582,7 @@ def build_episode_analysis(
     minimum_completed: int = Config.EPISODE_TUNING_MIN_COMPLETED,
     target_completed: int = Config.EPISODE_TUNING_TARGET,
     segment_min_completed: int = Config.EPISODE_SEGMENT_MIN_COMPLETED,
+    observed_scan_dates: Iterable[str] | None = None,
 ) -> EpisodeAnalysis:
     """Collapse daily signals into lifecycle episodes and compute maturity KPIs."""
     input_signals = 0 if performance is None else len(performance)
@@ -591,6 +610,7 @@ def build_episode_analysis(
         or not Config.EPISODE_REQUIRE_SINGLE_UNIVERSE
     )
     overall_ready = completed_r >= minimum_completed and universe_ok
+    target_review_due = completed_r >= target_completed and universe_ok
 
     leg_column = (
         "PlanSelectedLeg"
@@ -624,10 +644,24 @@ def build_episode_analysis(
             "remaining_to_target": max(target_completed - completed_r, 0),
             "stage": stage,
             "parameter_tuning_allowed": overall_ready,
+            "global_analysis_allowed": overall_ready,
+            "analysis_review_allowed": overall_ready,
+            "power_ci_review_due": target_review_due,
+            "parameter_change_authorized": False,
+            "scope_model": "overall_gate_with_independent_segments",
+            "all_segments_required_for_global": False,
+            "segment_min_completed": segment_min_completed,
             # 樣本數已足、卻因母體混合而被擋下時,要能一眼看出是哪一種阻擋
             "blocked_by_universe": (
                 completed_r >= minimum_completed and not universe_ok
             ),
+        },
+        "segment_scope": {
+            "mode": "independent_after_global",
+            "global_gate_requires_all_segments": False,
+            "segment_min_completed": segment_min_completed,
+            "selected_legs": list(TUNING_SCOPE_SELECTED_LEGS),
+            "order_types": list(TUNING_SCOPE_ORDER_TYPES),
         },
         "universe_cohort": universe_cohort,
         # 純資訊:預估何時達標。預估失敗絕不可影響授權判斷,故整段包起來,
@@ -636,18 +670,21 @@ def build_episode_analysis(
             episodes,
             minimum_completed=minimum_completed,
             target_completed=target_completed,
+            observed_scan_dates=observed_scan_dates,
         ),
         "by_selected_leg": _segments(
             episodes,
             leg_column,
             overall_ready=overall_ready,
             segment_min_completed=segment_min_completed,
+            tuning_scope=TUNING_SCOPE_SELECTED_LEGS,
         ),
         "by_order_type": _segments(
             episodes,
             "OrderType",
             overall_ready=overall_ready,
             segment_min_completed=segment_min_completed,
+            tuning_scope=TUNING_SCOPE_ORDER_TYPES,
         ),
     }
     markdown = _markdown(summary)

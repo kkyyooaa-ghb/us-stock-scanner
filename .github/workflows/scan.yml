@@ -59,6 +59,9 @@ jobs:
       - name: 安裝相依套件
         run: pip install -r requirements.txt
 
+      - name: 記錄 resolved runtime provenance
+        run: python -m runtime_provenance --output runtime_provenance.json
+
       - name: 執行掃描
         env:
           NOTION_TOKEN:      ${{ secrets.NOTION_TOKEN }}
@@ -79,18 +82,21 @@ jobs:
 
       - name: 驗證每日快照健康
         if: always()
+        id: health
         run: >-
           python -m snapshot_health scan_result.csv
           --expected-git-sha "$GITHUB_SHA"
           --json-output snapshot_health.json
           --markdown-output "$GITHUB_STEP_SUMMARY"
+          --github-output "$GITHUB_OUTPUT"
 
       - name: 上傳掃描結果
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scan-result-${{ github.run_id }}
+          name: scan-result-${{ github.run_id }}-${{ steps.health.outputs.status }}-${{ steps.health.outputs.retryable }}
           path: |
             scan_result.csv
             snapshot_health.json
+            runtime_provenance.json
           retention-days: 30

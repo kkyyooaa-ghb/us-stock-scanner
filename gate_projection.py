@@ -26,7 +26,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 
@@ -152,6 +152,7 @@ def project_gate_completion(
     minimum_completed: int = Config.EPISODE_TUNING_MIN_COMPLETED,
     target_completed: int = Config.EPISODE_TUNING_TARGET,
     as_of: str | None = None,
+    observed_scan_dates: Iterable[str] | None = None,
     session_resolver: Callable[[str, int], str | None] | None = None,
 ) -> dict[str, Any]:
     """預估 completed-R 達到 minimum 與 target 的交易日數與日期。
@@ -178,8 +179,6 @@ def project_gate_completion(
     filled = int((status == "open").sum()) + completed_now
     unfilled = int((status == "unfilled").sum())
 
-    as_of = as_of or str(episodes["EpisodeStartDate"].max())
-
     # --- 已知管線(決定性) ---
     open_rows = episodes.loc[status == "open"]
     time_exit_series = pd.to_numeric(
@@ -201,16 +200,37 @@ def project_gate_completion(
 
     # --- 未來到達(估計) ---
     starts = episodes["EpisodeStartDate"].astype(str).value_counts().sort_index()
-    if len(starts) < _MIN_OBSERVED_SCAN_DAYS + 1:
+    cohort_first_scan_day = str(starts.index[0])
+    observed_starts = starts.iloc[1:]
+    total_arrivals = float(observed_starts.sum())
+
+    normalized_scan_dates: set[str] = set()
+    if observed_scan_dates is not None:
+        for value in observed_scan_dates:
+            parsed = pd.to_datetime(value, errors="coerce")
+            if not pd.isna(parsed):
+                normalized_scan_dates.add(parsed.strftime("%Y-%m-%d"))
+        normalized_scan_dates.update(str(value) for value in starts.index)
+        post_backlog_scan_dates = sorted(
+            value
+            for value in normalized_scan_dates
+            if value > cohort_first_scan_day
+        )
+        observed_days = len(post_backlog_scan_dates)
+    else:
+        post_backlog_scan_dates = [str(value) for value in observed_starts.index]
+        observed_days = len(observed_starts)
+
+    if observed_days < _MIN_OBSERVED_SCAN_DAYS:
         # +1 是因為要先丟掉 cohort 首日的 backlog fold
         return _blocked(
             "insufficient_history",
-            f"scan_days={len(starts)}；排除 cohort 首日後不足 "
+            f"scan_days={observed_days + 1}；排除 cohort 首日後不足 "
             f"{_MIN_OBSERVED_SCAN_DAYS} 天,無法估計到達率",
         )
-    observed_starts = starts.iloc[1:]
-    observed_days = len(observed_starts)
-    total_arrivals = float(observed_starts.sum())
+    as_of = as_of or max(
+        [str(episodes["EpisodeStartDate"].max()), *post_backlog_scan_dates]
+    )
     arrivals_per_day = total_arrivals / observed_days
 
     # 區間用 Poisson 而非樣本標準差。掃描日只有個位數時,樣本 sd 會給出
@@ -263,8 +283,12 @@ def project_gate_completion(
         "confidence": confidence,
         "basis": {
             "completed_now": completed_now,
-            "cohort_first_scan_day": str(starts.index[0]),
+            "cohort_first_scan_day": cohort_first_scan_day,
             "observed_scan_days": observed_days,
+            "zero_arrival_scan_days": max(
+                observed_days - len(observed_starts),
+                0,
+            ),
             "backlog_episodes_excluded": int(starts.iloc[0]),
             "arrivals_per_scan_day": round(arrivals_per_day, 3),
             "arrivals_rate_low": round(arrivals_rate_low, 3),

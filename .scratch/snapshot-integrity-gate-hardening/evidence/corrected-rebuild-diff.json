@@ -1,0 +1,28 @@
+{
+  "method": "offline episode rebuild from existing shadow_performance.csv plus health-filtered archived scan dates",
+  "live_market_downloads": false,
+  "quarantined_dates": ["2026-08-18"],
+  "raw_2026_08_18": {
+    "csv_preserved": true,
+    "data_rows": 1,
+    "tickers": ["MNST"],
+    "trade_plan_status": ["not_applicable"]
+  },
+  "shadow_performance_rows_2026_08_18": 0,
+  "before": {
+    "episodes": 94,
+    "completed_r": 17,
+    "open_pipeline": 49,
+    "minimum_eta_trading_days": 35,
+    "target_eta_trading_days": 52
+  },
+  "after": {
+    "episodes": 94,
+    "completed_r": 17,
+    "open_pipeline": 49,
+    "minimum_eta_trading_days": 35,
+    "target_eta_trading_days": 52,
+    "zero_arrival_scan_days": 0
+  },
+  "conclusion": "2026-08-18 did not enter shadow performance; quarantine leaves completed-R, pipeline, and ETA trading-day counts unchanged"
+}

@@ -25,6 +25,7 @@ from execution_measurement import (
     evaluate_trade_plan,
 )
 from sources import ET_TZ, resolve_plan_entry_timing
+from snapshot_health import archived_snapshot_eligibility
 from snapshot_schema import snapshot_data_rows
 from trade_plan import OrderType, PlanAnchor, SignalLeg, TradePlan
 
@@ -255,10 +256,17 @@ def download_as_traded_histories(
 
 
 def _load_snapshots(paths: list[str]) -> pd.DataFrame:
-    frames = [
-        snapshot_data_rows(pd.read_csv(path))
-        for path in paths
-    ]
+    frames = []
+    for path in paths:
+        eligibility = archived_snapshot_eligibility(path)
+        if not eligibility["eligible"]:
+            health = eligibility.get("health", {})
+            print(
+                f"⏭️  quarantine {path}:"
+                f"{health.get('status', 'blocked')}"
+            )
+            continue
+        frames.append(snapshot_data_rows(pd.read_csv(path)))
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 

@@ -33,7 +33,18 @@ from pathlib import Path
 
 import requests
 from config import Config
+from episode_analysis import (
+    TUNING_SCOPE_ORDER_TYPES,
+    TUNING_SCOPE_SELECTED_LEGS,
+)
+from snapshot_health import (
+    archived_snapshot_eligibility,
+    health_report_allows_calibration,
+    legacy_health_fallback_allowed,
+    read_health_report,
+)
 from snapshot_schema import snapshot_data_rows, write_snapshot
+from sources import is_trading_day
 from trade_plan import strategy_config_hash, universe_version
 
 try:
@@ -98,8 +109,8 @@ def fetch_week_artifacts(week_start: str, week_end: str) -> list[dict]:
     return ordered
 
 
-def download_csv(artifact_id: int):
-    """下載單一 artifact zip → 解出完整 scan_result.csv（含 control row）。"""
+def download_artifact(artifact_id: int) -> dict | None:
+    """Download one scanner artifact with its health and runtime provenance."""
     import pandas as pd
     repo  = os.environ["GITHUB_REPOSITORY"]
     token = os.environ["GITHUB_TOKEN"]
@@ -109,26 +120,106 @@ def download_csv(artifact_id: int):
                          timeout=60, allow_redirects=True)
         r.raise_for_status()
         with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-            name = next((n for n in zf.namelist() if n.endswith(".csv")), None)
-            if name is None:
+            names = zf.namelist()
+            snapshot_name = next(
+                (name for name in names if Path(name).name == "scan_result.csv"),
+                None,
+            )
+            if snapshot_name is None:
                 return None
-            with zf.open(name) as f:
-                df = pd.read_csv(f, encoding="utf-8-sig")
-        return df
+            with zf.open(snapshot_name) as handle:
+                frame = pd.read_csv(handle, encoding="utf-8-sig")
+
+            health_name = next(
+                (name for name in names if Path(name).name == "snapshot_health.json"),
+                None,
+            )
+            health = None
+            if health_name is not None:
+                with zf.open(health_name) as handle:
+                    health = json.loads(handle.read().decode("utf-8"))
+
+            provenance_name = next(
+                (name for name in names if Path(name).name == "runtime_provenance.json"),
+                None,
+            )
+            runtime_provenance = None
+            if provenance_name is not None:
+                with zf.open(provenance_name) as handle:
+                    runtime_provenance = json.loads(handle.read().decode("utf-8"))
+        return {
+            "frame": frame,
+            "health": health,
+            "runtime_provenance": runtime_provenance,
+        }
     except Exception as e:
         print(f"⚠️  artifact {artifact_id} 下載/解析失敗:{e}")
         return None
 
 
-def select_daily_artifacts(candidates: list[dict]) -> list[dict]:
-    """Prefer successful premarket data over later rerun failures per ET date."""
-    selected: dict[str, tuple[tuple[int, datetime], dict]] = {}
+def download_csv(artifact_id: int):
+    """Backward-compatible frame-only adapter."""
+    artifact = download_artifact(artifact_id)
+    return artifact.get("frame") if artifact else None
+
+
+def _legacy_health_report(detail: str = "artifact predates health sidecars") -> dict:
+    """Make the migration exception explicit instead of treating None as healthy."""
+    return {
+        "policy_version": "snapshot-usability-v1",
+        "status": "warning",
+        "usable_for_shadow": True,
+        "eligible_for_weekly_calibration": True,
+        "retryable": False,
+        "errors": [],
+        "warnings": [{"code": "legacy_without_health", "message": detail}],
+        "metrics": {},
+        "legacy_without_health": True,
+    }
+
+
+def resolve_artifact_health(
+    candidate: dict,
+    report_root: Path = REPORT_ROOT,
+) -> dict:
+    """Resolve run-level artifact health without borrowing another run's status.
+
+    Before the health-policy cutover, a curated day-level sidecar is allowed to
+    correct historical artifacts (notably the 2026-08-18 quarantine). From the
+    cutover onward each Actions candidate must carry its own inline run health;
+    a daily archive sidecar belongs to the already-selected immutable snapshot
+    and must never make a different run usable or blocked.
+    """
+    et_date = str(candidate.get("et_date", "")).strip()
+    sidecar = report_root / "daily_health" / f"{et_date}.json"
+    inline = candidate.get("health")
+    if legacy_health_fallback_allowed(et_date):
+        if et_date and sidecar.is_file():
+            return read_health_report(sidecar)
+        if isinstance(inline, dict):
+            return inline
+        return _legacy_health_report()
+    if isinstance(inline, dict):
+        return inline
+    return _missing_health_report(
+        "post-policy artifact omitted snapshot_health.json"
+    )
+
+
+def select_daily_artifacts(
+    candidates: list[dict],
+    report_root: Path = REPORT_ROOT,
+) -> list[dict]:
+    """Prefer health-accepted premarket data; retain incidents if none passed."""
+    selected: dict[str, tuple[tuple[int, int, datetime], dict]] = {}
     for candidate in candidates:
         frame = candidate.get("frame")
         if frame is None:
             continue
+        health = resolve_artifact_health(candidate, report_root)
+        usable = health_report_allows_calibration(health)
         data = snapshot_data_rows(frame)
-        if not data.empty and "Priority" in data.columns:
+        if usable and not data.empty and "Priority" in data.columns:
             sessions = (
                 set(data["ScanSession"].astype(str))
                 if "ScanSession" in data.columns
@@ -148,14 +239,19 @@ def select_daily_artifacts(candidates: list[dict]) -> list[dict]:
         else:
             quality = 0
 
-        rank = (quality, candidate["created_at"])
+        enriched = {
+            **candidate,
+            "health": health,
+            "health_usable": usable,
+            "incident": not usable,
+        }
+        rank = (int(usable), quality, candidate["created_at"])
         current = selected.get(candidate["et_date"])
         if current is None or rank > current[0]:
-            selected[candidate["et_date"]] = (rank, candidate)
+            selected[candidate["et_date"]] = (rank, enriched)
     return [
         selected[date][1]
         for date in sorted(selected)
-        if selected[date][0][0] > 0
     ]
 
 
@@ -172,6 +268,8 @@ def archive_daily_csv(df, et_date: str, report_root: Path = REPORT_ROOT) -> str:
     daily_dir = report_root / "daily"
     daily_dir.mkdir(parents=True, exist_ok=True)
     path = daily_dir / f"{et_date}.csv"
+    if path.is_file():
+        return path.relative_to(report_root.parent).as_posix()
     versions = (
         set(df["SnapshotSchemaVersion"].dropna().astype(str))
         if "SnapshotSchemaVersion" in df.columns
@@ -186,6 +284,146 @@ def archive_daily_csv(df, et_date: str, report_root: Path = REPORT_ROOT) -> str:
                   f"(現行 {Config.SNAPSHOT_SCHEMA_VERSION})")
         df.to_csv(path, index=False, encoding="utf-8-sig")
     return path.relative_to(report_root.parent).as_posix()
+
+
+def _missing_health_report(detail: str = "artifact omitted snapshot_health.json") -> dict:
+    return {
+        "policy_version": "snapshot-usability-v1",
+        "status": "blocked",
+        "usable_for_shadow": False,
+        "eligible_for_weekly_calibration": False,
+        "retryable": False,
+        "errors": [{"code": "health_report_missing", "message": detail}],
+        "warnings": [],
+        "metrics": {},
+    }
+
+
+def archive_daily_health(
+    report: dict | None,
+    et_date: str,
+    report_root: Path = REPORT_ROOT,
+) -> str:
+    daily_health = report_root / "daily_health"
+    daily_health.mkdir(parents=True, exist_ok=True)
+    path = daily_health / f"{et_date}.json"
+    if path.is_file():
+        return path.relative_to(report_root.parent).as_posix()
+    payload = report if isinstance(report, dict) else _missing_health_report()
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path.relative_to(report_root.parent).as_posix()
+
+
+def archive_runtime_provenance(
+    provenance: dict | None,
+    et_date: str,
+    report_root: Path = REPORT_ROOT,
+) -> str | None:
+    if not isinstance(provenance, dict):
+        return None
+    destination = report_root / "runtime_provenance"
+    destination.mkdir(parents=True, exist_ok=True)
+    path = destination / f"{et_date}.json"
+    if path.is_file():
+        return path.relative_to(report_root.parent).as_posix()
+    path.write_text(
+        json.dumps(provenance, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path.relative_to(report_root.parent).as_posix()
+
+
+def archive_incident_artifact(
+    candidate: dict,
+    report_root: Path = REPORT_ROOT,
+) -> list[str]:
+    """Permanently retain an unusable raw attempt without replacing daily CSV."""
+    if health_report_allows_calibration(candidate.get("health")):
+        return []
+    incident_dir = (
+        report_root
+        / "incidents"
+        / str(candidate["et_date"])
+        / f"run-{candidate['id']}"
+    )
+    incident_dir.mkdir(parents=True, exist_ok=True)
+    frame_path = incident_dir / "scan_result.csv"
+    if not frame_path.is_file():
+        candidate["frame"].to_csv(
+            frame_path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+    health_path = incident_dir / "snapshot_health.json"
+    if not health_path.is_file():
+        health_path.write_text(
+            json.dumps(
+                candidate.get("health") or _missing_health_report(),
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+    paths = [frame_path, health_path]
+    if isinstance(candidate.get("runtime_provenance"), dict):
+        provenance_path = incident_dir / "runtime_provenance.json"
+        if not provenance_path.is_file():
+            provenance_path.write_text(
+                json.dumps(
+                    candidate["runtime_provenance"],
+                    ensure_ascii=False,
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+        paths.append(provenance_path)
+    return [path.relative_to(report_root.parent).as_posix() for path in paths]
+
+
+def operational_week_summary(
+    week_start: str,
+    week_end: str,
+    selected_artifacts: list[dict],
+) -> dict:
+    start = datetime.strptime(week_start, "%Y-%m-%d").date()
+    end = datetime.strptime(week_end, "%Y-%m-%d").date()
+    scheduled: list[str] = []
+    cursor = start
+    while cursor <= end:
+        date_text = cursor.isoformat()
+        calendar = is_trading_day(date_text)
+        if (
+            calendar.get("is_session")
+            if calendar.get("ok")
+            else cursor.weekday() < 5
+        ):
+            scheduled.append(date_text)
+        cursor += timedelta(days=1)
+
+    observed = sorted({item["et_date"] for item in selected_artifacts})
+    usable = sorted({
+        item["et_date"]
+        for item in selected_artifacts
+        if item.get("health_usable")
+    })
+    incident = sorted((set(scheduled) - set(usable)) | {
+        item["et_date"]
+        for item in selected_artifacts
+        if item.get("incident")
+    })
+    missing = sorted(set(scheduled) - set(observed))
+    return {
+        "scheduled_days": len(scheduled),
+        "usable_days": len(usable),
+        "incident_days": len(incident),
+        "scheduled_dates": scheduled,
+        "usable_dates": usable,
+        "incident_dates": incident,
+        "missing_artifact_dates": missing,
+    }
 
 
 # ==========================================================================
@@ -481,6 +719,12 @@ def _blocked_v13_gate(reason: str, detail: str = "") -> dict:
         "reason": reason,
         "detail": detail,
         "parameter_tuning_allowed": False,
+        "global_analysis_allowed": False,
+        "analysis_review_allowed": False,
+        "power_ci_review_due": False,
+        "parameter_change_authorized": False,
+        "scope_model": "overall_gate_with_independent_segments",
+        "all_segments_required_for_global": False,
         "expected": {
             "schema_version": Config.SNAPSHOT_SCHEMA_VERSION,
             "signal_engine_version": Config.SIGNAL_ENGINE_VERSION,
@@ -590,16 +834,58 @@ def load_v13_calibration_gate(
     expected_allowed = completed >= minimum and (
         universe_consistent or not Config.EPISODE_REQUIRE_SINGLE_UNIVERSE
     )
+    expected_target_review = completed >= target and (
+        universe_consistent or not Config.EPISODE_REQUIRE_SINGLE_UNIVERSE
+    )
+    analysis_review_allowed = maturity.get(
+        "analysis_review_allowed",
+        maturity.get("global_analysis_allowed"),
+    )
+    power_ci_review_due = maturity.get(
+        "power_ci_review_due",
+        expected_target_review,
+    )
+    parameter_change_authorized = maturity.get(
+        "parameter_change_authorized",
+        False,
+    )
     if (
         maturity.get("stage") != expected_status
         or maturity.get("parameter_tuning_allowed") is not expected_allowed
+        or maturity.get("global_analysis_allowed") is not expected_allowed
+        or analysis_review_allowed is not expected_allowed
+        or power_ci_review_due is not expected_target_review
+        or parameter_change_authorized is not False
+        or maturity.get("scope_model")
+        != "overall_gate_with_independent_segments"
+        or maturity.get("all_segments_required_for_global") is not False
+        or maturity.get("segment_min_completed")
+        != Config.EPISODE_SEGMENT_MIN_COMPLETED
         or maturity.get("remaining_to_minimum") != max(minimum - completed, 0)
         or maturity.get("remaining_to_target") != max(target - completed, 0)
     ):
         return _blocked_v13_gate("invalid_maturity", f"actual={maturity}")
 
+    expected_scope = {
+        "mode": "independent_after_global",
+        "global_gate_requires_all_segments": False,
+        "segment_min_completed": Config.EPISODE_SEGMENT_MIN_COMPLETED,
+        "selected_legs": list(TUNING_SCOPE_SELECTED_LEGS),
+        "order_types": list(TUNING_SCOPE_ORDER_TYPES),
+    }
+    supplied_scope = summary.get("segment_scope")
+    if supplied_scope is not None and supplied_scope != expected_scope:
+        return _blocked_v13_gate(
+            "invalid_segment_scope",
+            f"expected={expected_scope}; actual={supplied_scope}",
+        )
+
     validated_segments = {}
-    for key in ("by_selected_leg", "by_order_type"):
+    tuning_scopes = {
+        "by_selected_leg": set(TUNING_SCOPE_SELECTED_LEGS),
+        "by_order_type": set(TUNING_SCOPE_ORDER_TYPES),
+    }
+    for key, tuning_scope in tuning_scopes.items():
         segments = summary.get(key)
         if not isinstance(segments, list):
             return _blocked_v13_gate("invalid_segments", f"{key} must be a list")
@@ -608,14 +894,21 @@ def load_v13_calibration_gate(
                 return _blocked_v13_gate("invalid_segments", f"{key} row must be an object")
             segment_completed = segment.get("completed_r")
             segment_minimum = segment.get("segment_min_completed")
+            expected_in_scope = segment.get("segment") in tuning_scope
+            supplied_in_scope = segment.get(
+                "in_tuning_scope",
+                expected_in_scope,
+            )
             expected_ready = (
                 expected_allowed
+                and expected_in_scope
                 and _nonnegative_int(segment_completed)
                 and segment_completed >= Config.EPISODE_SEGMENT_MIN_COMPLETED
             )
             if (
                 not _nonnegative_int(segment_completed)
                 or segment_minimum != Config.EPISODE_SEGMENT_MIN_COMPLETED
+                or supplied_in_scope is not expected_in_scope
                 or segment.get("tuning_ready") is not expected_ready
             ):
                 return _blocked_v13_gate(
@@ -629,6 +922,14 @@ def load_v13_calibration_gate(
         "status": expected_status,
         "reason": None,
         "parameter_tuning_allowed": expected_allowed,
+        "global_analysis_allowed": expected_allowed,
+        "analysis_review_allowed": expected_allowed,
+        "power_ci_review_due": expected_target_review,
+        "parameter_change_authorized": False,
+        "scope_model": "overall_gate_with_independent_segments",
+        "all_segments_required_for_global": False,
+        "segment_min_completed": Config.EPISODE_SEGMENT_MIN_COMPLETED,
+        "segment_scope": expected_scope,
         "completed_r": completed,
         "minimum_completed": minimum,
         "target_completed": target,
@@ -661,14 +962,43 @@ def refresh_v13_episode_artifacts(report_root: Path = REPORT_ROOT) -> dict:
     before rendering. Any failure is returned to the caller so the visible gate
     can fail closed instead of silently reusing a stale summary.
     """
-    snapshots = sorted((report_root / "daily").glob("*.csv"))
-    if not snapshots:
+    archived_snapshots = sorted((report_root / "daily").glob("*.csv"))
+    if not archived_snapshots:
         return {"ok": False, "reason": "no_daily_snapshots"}
+    inventory = [
+        archived_snapshot_eligibility(path)
+        for path in archived_snapshots
+    ]
+    snapshots = [
+        Path(item["snapshot"])
+        for item in inventory
+        if item["eligible"]
+    ]
+    incidents = [item for item in inventory if not item["eligible"]]
+    if not snapshots:
+        return {
+            "ok": False,
+            "reason": "no_usable_daily_snapshots",
+            "incident_count": len(incidents),
+        }
 
     performance_path = report_root / "shadow_performance.csv"
     episodes_path = report_root / "shadow_episodes.csv"
     summary_path = report_root / "shadow_episode_summary.json"
     markdown_path = report_root / "shadow_episode_summary.md"
+    scan_dates_path = report_root / "usable_scan_dates.json"
+    scan_dates_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "dates": [path.stem for path in snapshots],
+                "incident_dates": [Path(item["snapshot"]).stem for item in incidents],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
     try:
         from track_shadow_performance import main as track_shadow_main
         from build_shadow_episodes import main as build_episodes_main
@@ -693,6 +1023,8 @@ def refresh_v13_episode_artifacts(report_root: Path = REPORT_ROOT) -> dict:
             str(summary_path),
             "--markdown-output",
             str(markdown_path),
+            "--scan-dates-json",
+            str(scan_dates_path),
         ])
         if episode_result != 0:
             return {
@@ -711,6 +1043,11 @@ def refresh_v13_episode_artifacts(report_root: Path = REPORT_ROOT) -> dict:
         "ok": True,
         "summary_path": str(summary_path),
         "snapshot_count": len(snapshots),
+        "incident_count": len(incidents),
+        "legacy_without_health_count": sum(
+            bool(item.get("legacy_without_health"))
+            for item in inventory
+        ),
     }
 
 
@@ -792,9 +1129,16 @@ def notion_calibration_stats() -> dict:
 # ==========================================================================
 def build_message(agg: dict, notion: dict, calib: dict,
                   week_start: str, week_end: str,
-                  v13_gate: dict | None = None) -> str:
+                  v13_gate: dict | None = None,
+                  operations: dict | None = None) -> str:
     daily = agg["daily"]
     n_days = len(daily)
+    operations = operations or {
+        "scheduled_days": n_days,
+        "usable_days": n_days,
+        "incident_days": 0,
+        "incident_dates": [],
+    }
     v13_gate = v13_gate or _blocked_v13_gate("summary_not_supplied")
     if n_days == 0:
         if v13_gate.get("ok"):
@@ -809,7 +1153,9 @@ def build_message(agg: dict, notion: dict, calib: dict,
             )
         return (
             f"<b>📋 美股掃描週報(觀察期)</b>  {week_start} ~ {week_end}\n\n"
-            f"🚨 本週 <b>0 次</b>掃描紀錄 — 排程可能漏跑,"
+            f"排程 {operations['scheduled_days']} 日 | 可用 0 日 | "
+            f"事故 {operations['incident_days']} 日\n"
+            f"🚨 本週 <b>0 次</b>可用掃描紀錄 — 排程可能漏跑或 health 擋下,"
             f"請檢查 Actions 是否有執行/失敗。\n\n{gate_line}"
         )
 
@@ -821,13 +1167,21 @@ def build_message(agg: dict, notion: dict, calib: dict,
         else "觀察期"
     )
     lines = [f"<b>📋 美股掃描週報({phase})</b>  {week_start} ~ {week_end}",
-             f"掃描天數 <b>{n_days}</b> | 日均分析 {avg('n'):.0f} 檔", "",
+             f"排程 {operations['scheduled_days']} 日 | "
+             f"可用 <b>{operations['usable_days']}</b> 日 | "
+             f"事故 {operations['incident_days']} 日",
+             f"可用掃描天數 <b>{n_days}</b> | 日均分析 {avg('n'):.0f} 檔", "",
              "<b>分數分布(日均)</b>",
              f"  ≥7 達門檻:{avg('ge7'):.1f} 檔(週總 {agg['total_ge7']})",
              f"  6 分(差1分):{avg('eq6'):.1f} 檔",
              f"  5 分:{avg('eq5'):.1f} 檔",
              f"  3–4 分:{avg('b34'):.1f} 檔",
              f"  &lt;0 反向警告:{avg('warn'):.1f} 檔", ""]
+    if operations.get("incident_dates"):
+        lines.insert(
+            3,
+            "  ⚠️ incident: " + ", ".join(operations["incident_dates"]),
+        )
 
     lines.append("<b>本週最高分 Top5</b>(跨日取最佳)")
     for r in agg["top5"]:
@@ -878,12 +1232,16 @@ def build_message(agg: dict, notion: dict, calib: dict,
         )
         if v13_gate["status"] == "target_reached":
             lines.append(
-                "  ✅ 已達 100 筆目標；可進行正式升版評估，但不自動修改參數。"
+                "  ✅ 已達 100 筆目標；下一步是 power/CI 與正式升版審查，"
+                "不自動修改參數。"
             )
         elif v13_gate["parameter_tuning_allowed"]:
             lines.append(
-                "  🟡 已達 60 筆全體門檻，可啟動參數分析；"
-                "各策略腿／order type 仍須各自滿 20 筆。"
+                "  🟡 已達 60 筆全體門檻，只開放授權分析審查；"
+                "每個策略腿／order type 各自滿 20 才可判讀該 segment。"
+            )
+            lines.append(
+                "     五個 segment 不是 global gate 的聯合阻擋條件。"
             )
         elif v13_gate.get("blocked_by_universe"):
             universe = v13_gate.get("universe_cohort") or {}
@@ -998,13 +1356,13 @@ def build_message(agg: dict, notion: dict, calib: dict,
         )
     elif v13_gate["status"] == "target_reached":
         lines.append(
-            "💡 <i>V1.3 已達 100 筆 completed-R 目標；下一步是版本化分析、"
-            "獨立驗證與升版決策，不會自動套用參數。</i>"
+            "💡 <i>V1.3 已達 100 筆 completed-R 目標；下一步是 power/CI、"
+            "獨立驗證與升版決策。任何參數變更必須建立新 ConfigHash/cohort。</i>"
         )
     elif v13_gate["parameter_tuning_allowed"]:
         lines.append(
-            "💡 <i>V1.3 已達 60 筆 completed-R 最低門檻；可開始全體參數分析，"
-            "各 segment 仍須滿 20 筆才可個別判讀。</i>"
+            "💡 <i>V1.3 已達 60 筆 completed-R 最低門檻；只可開始全體授權分析審查。"
+            "各 segment 須各自滿 20 才可個別判讀，五個 segment 不聯合阻擋 global gate。</i>"
         )
     else:
         lines.append(
@@ -1059,6 +1417,7 @@ def write_report_files(message: str, agg: dict, notion: dict, calib: dict,
                        week_start: str, week_end: str,
                        archived_csv_files: list[str],
                        v13_gate: dict | None = None,
+                       operations: dict | None = None,
                        report_root: Path = REPORT_ROOT) -> list[str]:
     """
     同一份週報資料一次寫出:
@@ -1076,8 +1435,8 @@ def write_report_files(message: str, agg: dict, notion: dict, calib: dict,
     )
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     snapshot = {
-        # 4:`v13_calibration_gate` 新增 `projection`(達標日預估,純資訊)。
-        "schema_version": 4,
+        # 5:新增 scheduled/usable/incident operational day counts。
+        "schema_version": 5,
         "generated_at_utc": generated_at,
         "period": {"start": week_start, "end": week_end, "timezone": "America/New_York"},
         "sources": {
@@ -1087,6 +1446,7 @@ def write_report_files(message: str, agg: dict, notion: dict, calib: dict,
             "telegram": "delivery_only",
         },
         "aggregate": _json_safe(agg),
+        "operations": _json_safe(operations or {}),
         "notion_samples": _json_safe(notion),
         "calibration": _json_safe(calib),
         "v13_calibration_gate": _json_safe(
@@ -1153,10 +1513,23 @@ def main():
     arts = fetch_week_artifacts(week_start, week_end)
     downloaded = []
     for artifact in arts:
-        frame = download_csv(artifact["id"])
-        if frame is not None:
-            downloaded.append({**artifact, "frame": frame})
-    selected_artifacts = select_daily_artifacts(downloaded)
+        package = download_artifact(artifact["id"])
+        if package is not None:
+            downloaded.append({**artifact, **package})
+    resolved = [
+        {**artifact, "health": resolve_artifact_health(artifact)}
+        for artifact in downloaded
+    ]
+    incident_files = []
+    for artifact in resolved:
+        if not health_report_allows_calibration(artifact.get("health")):
+            incident_files.extend(archive_incident_artifact(artifact))
+    selected_artifacts = select_daily_artifacts(resolved)
+    operations = operational_week_summary(
+        week_start,
+        week_end,
+        selected_artifacts,
+    )
     days = []
     archived_csv_files = []
     for artifact in selected_artifacts:
@@ -1164,12 +1537,21 @@ def main():
         archived_csv_files.append(
             archive_daily_csv(full_snapshot, artifact["et_date"])
         )
+        archive_daily_health(artifact.get("health"), artifact["et_date"])
+        archive_runtime_provenance(
+            artifact.get("runtime_provenance"),
+            artifact["et_date"],
+        )
         data = snapshot_data_rows(full_snapshot)
-        if not data.empty and "Priority" in data.columns:
+        if (
+            artifact.get("health_usable")
+            and not data.empty
+            and "Priority" in data.columns
+        ):
             days.append((artifact["et_date"], data))
             print(f"  ✅ {artifact['et_date']}:{len(data)} 檔")
         else:
-            print(f"  ⚠️ {artifact['et_date']}:control snapshot 已封存，不納入彙總")
+            print(f"  ⚠️ {artifact['et_date']}:incident 已封存，不納入彙總/校準")
 
     agg = aggregate(days) if days else {"daily": [], "top5": [],
                                         "eq6_regulars": [], "warn_regulars": [],
@@ -1194,7 +1576,7 @@ def main():
     notion = notion_sample_counts(week_start, week_end)
     calib  = notion_calibration_stats()
     msg = build_message(
-        agg, notion, calib, week_start, week_end, v13_gate
+        agg, notion, calib, week_start, week_end, v13_gate, operations
     )
     report_files = write_report_files(
         msg,
@@ -1205,7 +1587,10 @@ def main():
         week_end,
         archived_csv_files,
         v13_gate,
+        operations,
     )
+    if incident_files:
+        print(f"🧯 incidents 已永久保存:{', '.join(incident_files)}")
     print(f"🗂️  週報已永久保存:{', '.join(report_files)}")
 
     print("─" * 40 + "\n" + msg.replace("<b>", "").replace("</b>", "")
