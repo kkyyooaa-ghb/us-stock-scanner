@@ -18,6 +18,16 @@ def _read_performance(path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _read_scan_dates(path: str | None) -> list[str] | None:
+    if not path:
+        return None
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    dates = payload.get("dates") if isinstance(payload, dict) else payload
+    if not isinstance(dates, list):
+        raise ValueError("scan dates JSON must be a list or an object with dates")
+    return [str(value) for value in dates]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Collapse V1.3 daily shadow signals into trade episodes."
@@ -35,6 +45,10 @@ def main(argv: list[str] | None = None) -> int:
         "--markdown-output",
         default="shadow_episode_summary.md",
     )
+    parser.add_argument(
+        "--scan-dates-json",
+        help="Usable scan dates, including normal zero-new-episode days",
+    )
     args = parser.parse_args(argv)
 
     if not Path(args.performance).is_file():
@@ -43,7 +57,11 @@ def main(argv: list[str] | None = None) -> int:
 
     performance = _read_performance(args.performance)
     try:
-        analysis = build_episode_analysis(performance)
+        scan_dates = _read_scan_dates(args.scan_dates_json)
+        analysis = build_episode_analysis(
+            performance,
+            observed_scan_dates=scan_dates,
+        )
     except Exception as exc:
         print(f"ERROR episode 建構失敗:{type(exc).__name__}:{exc}")
         return 1

@@ -44,7 +44,7 @@ def _rows(spec, *, seed=1, sd=1.0, r_upper_shift=0.0):
 
 class AuthorizationIsAbsolute(unittest.TestCase):
     def setUp(self):
-        self.frame = _rows({("leg_A", "buy_limit_zone"): (80, 0.8)})
+        self.frame = _rows({("consolidation_dip", "buy_limit_zone"): (80, 0.8)})
 
     def test_unauthorized_withholds_findings(self):
         result = analyze_tuning(self.frame, gate_allows_tuning=False)
@@ -77,8 +77,8 @@ class MultipleComparisonProtection(unittest.TestCase):
         """切很多格的純噪音,是這類工具最典型的假陽性來源。"""
         rng = np.random.default_rng(99)
         rows = []
-        for leg in ("a", "b", "c"):
-            for order_type in ("x", "y"):
+        for leg in ("consolidation_dip", "healthy_pullback", "oversold_bounce"):
+            for order_type in ("buy_limit_zone", "buy_stop_reclaim"):
                 for bias in ("bull", "bear"):
                     for value in rng.normal(0.0, 1.0, 40):
                         rows.append({
@@ -96,14 +96,14 @@ class MultipleComparisonProtection(unittest.TestCase):
 
     def test_adjusted_alpha_shrinks_with_more_cells(self):
         few = analyze_tuning(
-            _rows({("leg_A", "buy_limit_zone"): (40, 0.0)}),
+            _rows({("consolidation_dip", "buy_limit_zone"): (40, 0.0)}),
             gate_allows_tuning=True,
         )
         many = analyze_tuning(
             _rows({
-                ("leg_A", "buy_limit_zone"): (40, 0.0),
-                ("leg_B", "buy_stop_reclaim"): (40, 0.0),
-                ("leg_C", "buy_limit_zone"): (40, 0.0),
+                ("consolidation_dip", "buy_limit_zone"): (40, 0.0),
+                ("healthy_pullback", "buy_stop_reclaim"): (40, 0.0),
+                ("oversold_bounce", "buy_limit_zone"): (40, 0.0),
             }),
             gate_allows_tuning=True,
         )
@@ -112,20 +112,20 @@ class MultipleComparisonProtection(unittest.TestCase):
     def test_real_edge_still_survives_adjustment(self):
         """校正不能嚴到連真訊號都殺掉。"""
         frame = _rows({
-            ("leg_A", "buy_limit_zone"): (80, 1.0),
-            ("leg_B", "buy_stop_reclaim"): (80, 0.0),
+            ("consolidation_dip", "buy_limit_zone"): (80, 1.0),
+            ("healthy_pullback", "buy_stop_reclaim"): (80, 0.0),
         }, seed=3)
         result = analyze_tuning(frame, gate_allows_tuning=True)
         levels = {f["level"] for f in result["findings"]}
-        self.assertIn("leg_A", levels)
-        self.assertNotIn("leg_B", levels)
+        self.assertIn("consolidation_dip", levels)
+        self.assertNotIn("healthy_pullback", levels)
 
 
 class SampleSufficiency(unittest.TestCase):
     def test_cells_below_minimum_are_not_eligible(self):
-        frame = _rows({("leg_A", "buy_limit_zone"): (5, 2.0)})
+        frame = _rows({("consolidation_dip", "buy_limit_zone"): (5, 2.0)})
         result = analyze_tuning(frame, gate_allows_tuning=True)
-        cell = result["by_bound"]["lower"]["PlanSelectedLeg"]["leg_A"]
+        cell = result["by_bound"]["lower"]["PlanSelectedLeg"]["consolidation_dip"]
         self.assertFalse(cell["eligible"])
         self.assertFalse(cell["confirmed_signal"])
         self.assertEqual(result["findings"], [])
@@ -133,7 +133,7 @@ class SampleSufficiency(unittest.TestCase):
     def test_small_cells_do_not_dilute_the_correction(self):
         """樣本不足的格子本來就不下結論,不該稀釋校正幅度。"""
         frame = _rows({
-            ("leg_A", "buy_limit_zone"): (40, 0.0),
+            ("consolidation_dip", "buy_limit_zone"): (40, 0.0),
             ("leg_tiny", "buy_stop_reclaim"): (2, 0.0),
         })
         result = analyze_tuning(frame, gate_allows_tuning=True)
@@ -143,7 +143,24 @@ class SampleSufficiency(unittest.TestCase):
             in result["by_bound"]["lower"]["PlanSelectedLeg"].items()
             if stats["eligible"]
         ]
-        self.assertEqual(eligible, ["leg_A"])
+        self.assertEqual(eligible, ["consolidation_dip"])
+
+    def test_unknown_formal_segments_are_descriptive_only(self):
+        frame = _rows({("future_leg", "future_order"): (80, 2.0)}, sd=0.05)
+        result = analyze_tuning(
+            frame,
+            gate_allows_tuning=True,
+            dimensions=("PlanSelectedLeg", "OrderType"),
+        )
+
+        leg = result["by_bound"]["lower"]["PlanSelectedLeg"]["future_leg"]
+        order = result["by_bound"]["lower"]["OrderType"]["future_order"]
+        for stats in (leg, order):
+            self.assertFalse(stats["in_tuning_scope"])
+            self.assertFalse(stats["eligible"])
+            self.assertFalse(stats["confirmed_signal"])
+        self.assertEqual(result["hypotheses_tested"], 0)
+        self.assertEqual(result["findings"], [])
 
     def test_required_n_grows_with_dispersion(self):
         tight = _required_n(np.random.default_rng(1).normal(0, 0.5, 50))
@@ -170,27 +187,32 @@ class AmbiguousRBounds(unittest.TestCase):
     def test_divergent_bounds_are_flagged_not_averaged(self):
         """同日雙觸:下界有 edge、上界沒有 → 結論取決於盤中順序,必須標出。"""
         frame = _rows(
-            {("leg_A", "buy_limit_zone"): (80, 1.0)}, seed=5, r_upper_shift=-1.0
+            {("consolidation_dip", "buy_limit_zone"): (80, 1.0)},
+            seed=5,
+            r_upper_shift=-1.0,
         )
         result = analyze_tuning(frame, gate_allows_tuning=True)
         finding = next(
-            f for f in result["findings"] if f["level"] == "leg_A"
+            f for f in result["findings"] if f["level"] == "consolidation_dip"
         )
         self.assertNotEqual(
             finding["mean_r_lower_bound"], finding["mean_r_upper_bound"]
         )
 
     def test_agreeing_bounds_are_robust(self):
-        frame = _rows({("leg_A", "buy_limit_zone"): (80, 1.0)}, seed=5)
+        frame = _rows({("consolidation_dip", "buy_limit_zone"): (80, 1.0)}, seed=5)
         result = analyze_tuning(frame, gate_allows_tuning=True)
-        finding = next(f for f in result["findings"] if f["level"] == "leg_A")
+        finding = next(
+            f for f in result["findings"]
+            if f["level"] == "consolidation_dip"
+        )
         self.assertTrue(finding["robust_across_r_bounds"])
 
 
 class Determinism(unittest.TestCase):
     def test_same_input_gives_same_answer(self):
         """bootstrap 有隨機性;固定種子讓同一份資料每次結論一致。"""
-        frame = _rows({("leg_A", "buy_limit_zone"): (60, 0.5)})
+        frame = _rows({("consolidation_dip", "buy_limit_zone"): (60, 0.5)})
         first = analyze_tuning(frame, gate_allows_tuning=True)
         second = analyze_tuning(frame, gate_allows_tuning=True)
         self.assertEqual(first["by_bound"], second["by_bound"])

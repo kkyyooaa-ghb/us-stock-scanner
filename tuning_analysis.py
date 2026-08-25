@@ -43,6 +43,10 @@ import numpy as np
 import pandas as pd
 
 from config import Config
+from episode_analysis import (
+    TUNING_SCOPE_ORDER_TYPES,
+    TUNING_SCOPE_SELECTED_LEGS,
+)
 
 BOOTSTRAP_ITERATIONS = 10_000
 DEFAULT_ALPHA = 0.05
@@ -130,6 +134,23 @@ DEFAULT_DIMENSIONS = (
     "PreGapStatus",
 )
 
+FORMAL_SEGMENT_SCOPES = {
+    "PlanSelectedLeg": frozenset(TUNING_SCOPE_SELECTED_LEGS),
+    "OrderType": frozenset(TUNING_SCOPE_ORDER_TYPES),
+}
+
+
+def _in_tuning_scope(dimension: str, level: str) -> bool:
+    """Whether a categorical level belongs to the formal decision scope.
+
+    Unrecognised selected legs and order types remain visible as descriptive
+    diagnostics, but can never become eligible hypotheses or tuning findings.
+    Other exploratory dimensions are not constrained by this formal segment
+    catalogue.
+    """
+    allowed = FORMAL_SEGMENT_SCOPES.get(dimension)
+    return allowed is None or level in allowed
+
 
 def _completed(episodes: pd.DataFrame) -> pd.DataFrame:
     status = episodes.get("EpisodeStatus")
@@ -206,7 +227,9 @@ def analyze_tuning(
         ):
             cell_index.append((dimension, str(level), group))
     eligible_cells = sum(
-        1 for _, _, group in cell_index if len(group) >= min_cell
+        1
+        for dimension, level, group in cell_index
+        if len(group) >= min_cell and _in_tuning_scope(dimension, level)
     )
     hypotheses = max(eligible_cells, 1)
     adjusted_alpha = alpha / hypotheses
@@ -225,6 +248,12 @@ def analyze_tuning(
                     group, r_column, alpha, adjusted_alpha, min_cell
                 )
                 if stats is not None:
+                    in_tuning_scope = _in_tuning_scope(dimension, level)
+                    stats["in_tuning_scope"] = in_tuning_scope
+                    if not in_tuning_scope:
+                        stats["eligible"] = False
+                        stats["exploratory_signal"] = False
+                        stats["confirmed_signal"] = False
                     cells[level] = stats
             if cells:
                 per_dimension[dimension] = cells
@@ -237,7 +266,7 @@ def analyze_tuning(
     for dimension, cells in lower.items():
         for level, stats in cells.items():
             other = (upper.get(dimension) or {}).get(level)
-            if not stats["confirmed_signal"]:
+            if not stats["in_tuning_scope"] or not stats["confirmed_signal"]:
                 continue
             robust = bool(other and other["confirmed_signal"])
             findings.append({
@@ -311,8 +340,8 @@ def render_markdown(analysis: dict[str, Any]) -> str:
                 f"### {dimension}",
                 "",
                 "| level | n | mean R | 95% CI | 校正後 CI | 勝率 | 停損率 | "
-                "達標 | 探索 | 確認 | 需要 n |",
-                "|---|---:|---:|---|---|---:|---:|:---:|:---:|:---:|---:|",
+                "正式範圍 | 達標 | 探索 | 確認 | 需要 n |",
+                "|---|---:|---:|---|---|---:|---:|:---:|:---:|:---:|:---:|---:|",
             ])
             for level, s in cells.items():
                 def fmt(low, high):
@@ -325,6 +354,7 @@ def render_markdown(analysis: dict[str, Any]) -> str:
                     f"{fmt(s['ci_low'], s['ci_high'])} | "
                     f"{fmt(s['adj_ci_low'], s['adj_ci_high'])} | "
                     f"{s['win_rate']:.0%} | {s['stop_rate']:.0%} | "
+                    f"{'yes' if s['in_tuning_scope'] else 'no'} | "
                     f"{'yes' if s['eligible'] else 'no'} | "
                     f"{'yes' if s['exploratory_signal'] else '-'} | "
                     f"{'yes' if s['confirmed_signal'] else '-'} | "
@@ -392,7 +422,13 @@ def main(argv: list[str] | None = None) -> int:
         from weekly_report import load_v13_calibration_gate
 
         gate = load_v13_calibration_gate(args.summary)
-        allowed = bool(gate.get("ok") and gate.get("parameter_tuning_allowed"))
+        allowed = bool(
+            gate.get("ok")
+            and gate.get(
+                "analysis_review_allowed",
+                gate.get("parameter_tuning_allowed"),
+            )
+        )
 
     analysis = analyze_tuning(episodes, gate_allows_tuning=allowed)
     markdown = render_markdown(analysis)

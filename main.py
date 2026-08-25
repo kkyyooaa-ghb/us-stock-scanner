@@ -24,6 +24,7 @@ import time
 import traceback
 import sys
 import os                                          # 讀 FORCE_NOTION_SYNC env
+from pathlib import Path
 
 from datetime import datetime
 
@@ -64,6 +65,7 @@ from snapshot_schema import (
     write_skipped_snapshot,
     write_snapshot,
 )
+from snapshot_health import evaluate_snapshot_health, write_health_report
 from trade_plan import (
     build_shadow_trade_plan,
     strategy_config_hash,
@@ -787,6 +789,30 @@ def run_scanner():
         print(f"  ⚠️  {stale_n} 檔訊號棒非 {sealed_bar_date},plan 降為 data_stale"
               f"(不進 shadow R):{list(stale_rows['Ticker'])[:8]}")
 
+    # 先封存不可變快照，再使用唯一 health contract 判定是否允許 outbound。
+    # Systemic source degradation 必須在 Notion / LLM / Telegram 前 fail closed；
+    # watchdog 只能在第一個 artifact 已保存後做至多一次乾淨補跑。
+    final_snapshot = _assemble_snapshot(
+        df_all,
+        audit_df,
+        entry_timing,
+        snapshot_finalized_et.isoformat(),
+        expected_count,
+    )
+    write_snapshot(final_snapshot, "scan_result.csv")
+    health_report = evaluate_snapshot_health(
+        final_snapshot,
+        expected_git_sha=git_commit_sha,
+    )
+    write_health_report(health_report, "snapshot_health.json")
+    print(f"\n💾 scan_result.csv 已儲存({len(df_all)} data + "
+          f"{len(audit_df)} universe_audit)")
+    if not health_report.get("usable_for_shadow", False):
+        print("  🛑 快照不可用，已在所有 outbound publication 前停止")
+        for finding in health_report.get("errors", []):
+            print(f"    {finding.get('code')}: {finding.get('message')}")
+        return 2
+
     # ========== 決策摘要(前移供 Notion 大盤燈號用 — 原 V13.9.3) ==========
     decision = {}
     try:
@@ -963,29 +989,26 @@ def run_scanner():
     msg += f"\n⏱ 耗時 {elapsed}s"
     send_telegram(msg)
 
-    # 儲存 CSV:data 列 + universe_audit 列 = 完整母體,schema 會驗證對帳
-    write_snapshot(
-        _assemble_snapshot(df_all, audit_df, entry_timing,
-                           snapshot_finalized_et.isoformat(), expected_count),
-        "scan_result.csv",
-    )
-    print(f"\n💾 scan_result.csv 已儲存({len(df_all)} data + "
-          f"{len(audit_df)} universe_audit)")
     print(f"✅ 完成!耗時 {elapsed}s\n")
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        run_scanner()
+        exit_code = run_scanner()
+        if exit_code:
+            sys.exit(exit_code)
     except Exception as e:
         print("\n" + "=" * 55)
         print(f"❌ 主程式崩潰:{type(e).__name__}: {e}")
         print("=" * 55)
         traceback.print_exc()
-        # 即使崩潰也用 canonical schema 寫 control row，供 artifact 稽核。
-        write_failure_snapshot(
-            "scan_result.csv",
-            str(e),
-            error_type=type(e).__name__,
-        )
+        # 掃描本體尚未封存才補 control row。若 outbound 階段出錯，保留已通過
+        # health 的不可變快照，避免把可稽核資料覆寫成泛化錯誤列。
+        if not Path("scan_result.csv").is_file():
+            write_failure_snapshot(
+                "scan_result.csv",
+                str(e),
+                error_type=type(e).__name__,
+            )
         sys.exit(1)

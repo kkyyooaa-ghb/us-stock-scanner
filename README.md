@@ -19,11 +19,12 @@ flowchart TD
     D --> E{"Priority ≥ 7 ?"}
     E -->|是| F["trade_plan.py<br/>產生 TradePlan<br/>進場區間 / 停損 / 有效天數"]
     E -->|否| G["仍寫入快照<br/>不進 Top 10"]
-    F --> H["outputs.py<br/>Notion + Telegram"]
-    H --> I["llm_enrichment.py<br/>Tavily 新聞 → Gemini 摘要<br/>寫回 Notion"]
     F --> J["snapshot_schema.py<br/>102 欄 canonical CSV"]
     G --> J
     J --> K["snapshot_health.py<br/>母體對帳 / 快照健康檢查"]
+    K -->|可用| H["outputs.py<br/>Notion + Telegram"]
+    H --> I["llm_enrichment.py<br/>Tavily 新聞 → Gemini 摘要<br/>寫回 Notion"]
+    K -->|不可用| L["保留 raw + incident<br/>停止所有 outbound"]
 ```
 
 掃描本身**不下單、不建議部位大小**。它輸出的是「哪些標的觸發了哪條規則,
@@ -69,11 +70,16 @@ flowchart TD
 
 系統禁止憑感覺調參。要解鎖調參,必須同時滿足:
 
-1. **樣本數**:累積 60 筆 completed-R episode(目標 100)
-2. **分層樣本**:每個分層各滿 20 筆
+1. **全體樣本**:累積 60 筆 completed-R episode 後,才可啟動全體授權分析審查
+   (100 筆為 power/CI review 目標,不會自動調參)
+2. **獨立分層**:每個策略腿/order type 各自滿 20 筆,才可判讀該 segment;
+   三條腿與兩種 order type 並不是 global gate 的五個聯合阻擋條件
 3. **母體一致**:整批樣本必須出自同一套 `UniverseVersion`
 
-目前狀態(2026-08-18):**8 / 60,collecting** —— 預估 2026-10-14 達標。
+任何實際參數變更都必須建立新的 `ConfigHash`/cohort。
+
+目前狀態(2026-08-24 corrected rebuild):**17 / 60,collecting** ——
+目前模型預估 2026-10-12 達標。
 週報每週會更新預估日期與區間。
 
 ### 為什麼要這麼嚴
@@ -122,6 +128,18 @@ py -X utf8 -m tuning_analysis reports/shadow_episodes.csv
 | `snapshot_schema.py` | 102 欄 canonical CSV 契約,原子寫入與驗證 |
 | `snapshot_metadata.py` | 快照時點與成交日推導 |
 | `snapshot_health.py` | 每日健康檢查:母體對帳、SHA、報價狀態 |
+| `runtime_provenance.py` | 記錄 Python/runner/resolved packages；不納入策略 ConfigHash |
+
+`snapshot_health.py` 同時是 publication、workflow、週報與 shadow rebuild 的
+usability contract。`price_below_min`、`liquidity_below_min` 與少量
+`insufficient_history` 是 eligibility warning；`stale_bar`、
+`download_missing`、`processing_error` 是 data-quality exclusion。Systemic
+門檻為 `max(2, ceil(expected × 5%))`，NDX-99 即 5 檔；達門檻即保留 raw、
+標記 incident、阻止 outbound，並排除於週報平均及 calibration。
+缺少 health sidecar 的相容例外只限既有歷史（最後日期 2026-08-21）；
+2026-08-22 起任何 missing sidecar 一律 fail closed。
+對 2026-08-22 起的 Actions candidates，每個 run 只採用自己的 inline health；
+日級 sidecar 只對已選定的 create-only daily archive 有權威，不可跨 run 借用。
 
 ### 量測與校準
 | 檔案 | 職責 |
@@ -170,7 +188,7 @@ py -X utf8 -m tuning_analysis reports/shadow_episodes.csv
 ## 開發
 
 ```bash
-# 全套測試(239 項)
+# 全套測試(267 項)
 py -X utf8 -m unittest discover -s tests -p "test_*.py"
 
 # 單一模組
@@ -197,7 +215,7 @@ py -X utf8 -c "from trade_plan import strategy_config_hash, universe_version; pr
 
 ---
 
-## 現況速查(2026-08-18)
+## 現況速查(2026-08-24 corrected rebuild)
 
 | 項目 | 值 |
 |---|---|
@@ -206,7 +224,7 @@ py -X utf8 -c "from trade_plan import strategy_config_hash, universe_version; pr
 | Snapshot schema | `v1.3.3`(102 欄) |
 | ConfigHash | `8142e595d788ac06` |
 | UniverseVersion | `ndx-99-78834e47b659` |
-| 調參閘門 | 8 / 60(collecting),預估 2026-10-14 達標 |
-| 測試 | 239 項 |
+| 調參閘門 | 17 / 60(collecting),目前模型預估 2026-10-12 達標 |
+| 測試 | 267 項 |
 
 歷史沿革與每批改動的證據鏈見 `PROGRESS_*.md`。

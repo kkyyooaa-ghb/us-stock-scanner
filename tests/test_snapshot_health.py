@@ -7,6 +7,7 @@ import pandas as pd
 
 from config import Config
 from snapshot_health import (
+    archived_snapshot_eligibility,
     evaluate_snapshot_health,
     main as health_main,
     render_health_markdown,
@@ -86,6 +87,55 @@ def _audit_row(ticker="BBB", expected=2, **overrides):
 
 
 class SnapshotHealthTests(unittest.TestCase):
+    def test_archived_sidecar_quarantines_without_deleting_raw_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "reports"
+            snapshot = root / "daily" / "2026-08-18.csv"
+            health = root / "daily_health" / "2026-08-18.json"
+            snapshot.parent.mkdir(parents=True)
+            health.parent.mkdir(parents=True)
+            snapshot.write_text("Ticker\nMNST\n", encoding="utf-8")
+            health.write_text(
+                json.dumps({
+                    "status": "blocked",
+                    "usable_for_shadow": False,
+                    "eligible_for_weekly_calibration": False,
+                }),
+                encoding="utf-8",
+            )
+
+            result = archived_snapshot_eligibility(snapshot)
+
+            self.assertFalse(result["eligible"])
+            self.assertTrue(snapshot.is_file())
+
+    def test_legacy_archive_without_sidecar_remains_explicitly_eligible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = Path(tmp) / "reports" / "daily" / "2026-07-01.csv"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text("Ticker\nAAPL\n", encoding="utf-8")
+
+            result = archived_snapshot_eligibility(snapshot)
+
+            self.assertTrue(result["eligible"])
+            self.assertTrue(result["legacy_without_health"])
+
+    def test_post_policy_archive_without_sidecar_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = Path(tmp) / "reports" / "daily" / "2026-08-24.csv"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.write_text("Ticker\nAAPL\n", encoding="utf-8")
+
+            result = archived_snapshot_eligibility(snapshot)
+
+            self.assertFalse(result["eligible"])
+            self.assertFalse(result["legacy_without_health"])
+            self.assertEqual("blocked", result["health"]["status"])
+            self.assertEqual(
+                "health_report_missing",
+                result["health"]["errors"][0]["code"],
+            )
+
     def test_clean_snapshot_is_ok(self):
         frame = pd.DataFrame([
             _data_row("AAA"),
@@ -124,6 +174,125 @@ class SnapshotHealthTests(unittest.TestCase):
         self.assertEqual(
             {"stale_bar": 1},
             result["metrics"]["universe"]["reasons"],
+        )
+
+    def test_systemic_data_quality_exclusions_are_retryable_and_blocked(self):
+        tickers = [f"T{i:02d}" for i in range(99)]
+        rows = [_data_row(tickers[0], expected=99)]
+        rows.extend(
+            _audit_row(ticker, expected=99, UniverseExclusionReason="stale_bar")
+            for ticker in tickers[1:98]
+        )
+        rows.append(
+            _audit_row(
+                tickers[98],
+                expected=99,
+                UniverseExclusionReason="insufficient_history",
+            )
+        )
+
+        result = evaluate_snapshot_health(
+            pd.DataFrame(rows),
+            expected_tickers=tickers,
+        )
+
+        self.assertEqual("blocked", result["status"])
+        self.assertFalse(result["usable_for_shadow"])
+        self.assertFalse(result["eligible_for_weekly_calibration"])
+        self.assertTrue(result["retryable"])
+        self.assertEqual(
+            97,
+            result["metrics"]["usability_policy"]["data_quality_exclusions"],
+        )
+        self.assertIn(
+            "systemic_data_quality_failure",
+            [finding["code"] for finding in result["errors"]],
+        )
+
+    def test_single_eligibility_exclusion_remains_usable(self):
+        tickers = [f"T{i:02d}" for i in range(99)]
+        rows = [_data_row(ticker, expected=99) for ticker in tickers[:-1]]
+        rows.append(
+            _audit_row(
+                tickers[-1],
+                expected=99,
+                UniverseExclusionReason="liquidity_below_min",
+            )
+        )
+
+        result = evaluate_snapshot_health(
+            pd.DataFrame(rows),
+            expected_tickers=tickers,
+        )
+
+        self.assertEqual("warning", result["status"])
+        self.assertTrue(result["usable_for_shadow"])
+        self.assertTrue(result["eligible_for_weekly_calibration"])
+        self.assertFalse(result["retryable"])
+        self.assertEqual(
+            1,
+            result["metrics"]["usability_policy"]["eligibility_exclusions"],
+        )
+
+    def test_four_data_quality_exclusions_remain_usable_warning(self):
+        tickers = [f"T{i:02d}" for i in range(99)]
+        rows = [_data_row(ticker, expected=99) for ticker in tickers[:-4]]
+        rows.extend(
+            _audit_row(ticker, expected=99, UniverseExclusionReason="stale_bar")
+            for ticker in tickers[-4:]
+        )
+
+        result = evaluate_snapshot_health(
+            pd.DataFrame(rows),
+            expected_tickers=tickers,
+        )
+
+        self.assertEqual(5, result["metrics"]["usability_policy"]["systemic_threshold"])
+        self.assertEqual("warning", result["status"])
+        self.assertTrue(result["usable_for_shadow"])
+
+    def test_five_data_quality_exclusions_are_systemic(self):
+        tickers = [f"T{i:02d}" for i in range(99)]
+        rows = [_data_row(ticker, expected=99) for ticker in tickers[:-5]]
+        rows.extend(
+            _audit_row(ticker, expected=99, UniverseExclusionReason="stale_bar")
+            for ticker in tickers[-5:]
+        )
+
+        result = evaluate_snapshot_health(
+            pd.DataFrame(rows),
+            expected_tickers=tickers,
+        )
+
+        self.assertEqual("blocked", result["status"])
+        self.assertTrue(result["retryable"])
+
+    def test_systemic_insufficient_history_is_separate_retryable_incident(self):
+        tickers = [f"T{i:02d}" for i in range(99)]
+        rows = [_data_row(ticker, expected=99) for ticker in tickers[:-5]]
+        rows.extend(
+            _audit_row(
+                ticker,
+                expected=99,
+                UniverseExclusionReason="insufficient_history",
+            )
+            for ticker in tickers[-5:]
+        )
+
+        result = evaluate_snapshot_health(
+            pd.DataFrame(rows),
+            expected_tickers=tickers,
+        )
+
+        self.assertEqual("blocked", result["status"])
+        self.assertTrue(result["retryable"])
+        self.assertFalse(result["metrics"]["usability_policy"]["systemic_data_quality"])
+        self.assertTrue(
+            result["metrics"]["usability_policy"]["systemic_insufficient_history"]
+        )
+        self.assertIn(
+            "systemic_insufficient_history",
+            [finding["code"] for finding in result["errors"]],
         )
 
     def test_top10_stale_quote_is_visible_but_not_blocking(self):

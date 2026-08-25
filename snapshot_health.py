@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import json
+import math
 import os
 from pathlib import Path
 from typing import Iterable
@@ -14,6 +16,23 @@ from snapshot_schema import canonicalize_snapshot, snapshot_data_rows
 
 
 GAP_ROUNDING_TOLERANCE_PCT = 0.011
+HEALTH_POLICY_VERSION = "snapshot-usability-v1"
+# Explicit migration boundary: 2026-08-21 is the last archived scan date that
+# predates required sidecars. Any later missing sidecar is an incident, even if
+# an older workflow happened to produce it before this branch was deployed.
+HEALTH_SIDECAR_REQUIRED_FROM = "2026-08-22"
+ELIGIBILITY_EXCLUSION_REASONS = frozenset({
+    "insufficient_history",
+    "price_below_min",
+    "liquidity_below_min",
+})
+DATA_QUALITY_EXCLUSION_REASONS = frozenset({
+    "stale_bar",
+    "download_missing",
+    "processing_error",
+})
+SYSTEMIC_DATA_QUALITY_RATIO = 0.05
+SYSTEMIC_DATA_QUALITY_MIN_COUNT = 2
 
 
 def _counts(series: pd.Series) -> dict[str, int]:
@@ -45,8 +64,11 @@ def _finding(
 
 def _blocked_report(code: str, message: str) -> dict:
     return {
+        "policy_version": HEALTH_POLICY_VERSION,
         "status": "blocked",
         "usable_for_shadow": False,
+        "eligible_for_weekly_calibration": False,
+        "retryable": False,
         "errors": [_finding(code, message)],
         "warnings": [],
         "metrics": {},
@@ -84,15 +106,21 @@ def evaluate_snapshot_health(
         }
         if len(control) == len(snapshot) and run_status.eq("skipped").all():
             return {
+                "policy_version": HEALTH_POLICY_VERSION,
                 "status": "skipped",
                 "usable_for_shadow": False,
+                "eligible_for_weekly_calibration": False,
+                "retryable": False,
                 "errors": [],
                 "warnings": [],
                 "metrics": metrics,
             }
         return {
+            "policy_version": HEALTH_POLICY_VERSION,
             "status": "blocked",
             "usable_for_shadow": False,
+            "eligible_for_weekly_calibration": False,
+            "retryable": False,
             "errors": [
                 _finding(
                     "control_snapshot",
@@ -165,14 +193,67 @@ def evaluate_snapshot_health(
             )
         )
 
-    if not audit.empty:
-        reasons = _counts(audit["UniverseExclusionReason"])
+    reasons = (
+        _counts(audit["UniverseExclusionReason"])
+        if not audit.empty
+        else {}
+    )
+    if reasons:
         warnings.append(
             _finding(
                 "universe_not_processed",
                 "some universe tickers were excluded or missing: "
                 + ", ".join(f"{key}={value}" for key, value in reasons.items()),
                 tickers=audit["Ticker"].astype(str),
+            )
+        )
+
+    data_quality_count = sum(
+        reasons.get(reason, 0)
+        for reason in DATA_QUALITY_EXCLUSION_REASONS
+    )
+    eligibility_count = sum(
+        reasons.get(reason, 0)
+        for reason in ELIGIBILITY_EXCLUSION_REASONS
+    )
+    systemic_threshold = max(
+        SYSTEMIC_DATA_QUALITY_MIN_COUNT,
+        math.ceil(len(expected_set) * SYSTEMIC_DATA_QUALITY_RATIO),
+    )
+    systemic_data_quality = data_quality_count >= systemic_threshold
+    if systemic_data_quality:
+        errors.append(
+            _finding(
+                "systemic_data_quality_failure",
+                "data-quality exclusions reached the systemic threshold: "
+                f"{data_quality_count}/{len(expected_set)} >= "
+                f"{systemic_threshold}",
+                tickers=audit.loc[
+                    audit["UniverseExclusionReason"].astype(str).isin(
+                        DATA_QUALITY_EXCLUSION_REASONS
+                    ),
+                    "Ticker",
+                ],
+            )
+        )
+
+    insufficient_history_count = reasons.get("insufficient_history", 0)
+    systemic_insufficient_history = (
+        insufficient_history_count >= systemic_threshold
+    )
+    if systemic_insufficient_history:
+        errors.append(
+            _finding(
+                "systemic_insufficient_history",
+                "insufficient-history exclusions reached the systemic threshold: "
+                f"{insufficient_history_count}/{len(expected_set)} >= "
+                f"{systemic_threshold}",
+                tickers=audit.loc[
+                    audit["UniverseExclusionReason"].astype(str).eq(
+                        "insufficient_history"
+                    ),
+                    "Ticker",
+                ],
             )
         )
 
@@ -294,11 +375,18 @@ def evaluate_snapshot_health(
             "missing": int(
                 audit["UniverseDisposition"].astype(str).eq("missing").sum()
             ),
-            "reasons": (
-                _counts(audit["UniverseExclusionReason"])
-                if not audit.empty
-                else {}
-            ),
+            "reasons": reasons,
+        },
+        "usability_policy": {
+            "version": HEALTH_POLICY_VERSION,
+            "eligibility_reasons": sorted(ELIGIBILITY_EXCLUSION_REASONS),
+            "data_quality_reasons": sorted(DATA_QUALITY_EXCLUSION_REASONS),
+            "eligibility_exclusions": eligibility_count,
+            "data_quality_exclusions": data_quality_count,
+            "systemic_threshold": systemic_threshold,
+            "systemic_ratio": SYSTEMIC_DATA_QUALITY_RATIO,
+            "systemic_data_quality": systemic_data_quality,
+            "systemic_insufficient_history": systemic_insufficient_history,
         },
         "data_bar_dates": _counts(data["DataBarDate"]),
         "pregap": {
@@ -324,9 +412,21 @@ def evaluate_snapshot_health(
     }
 
     status = "blocked" if errors else ("warning" if warnings else "ok")
+    usable = not errors
+    retryable_codes = {
+        "systemic_data_quality_failure",
+        "systemic_insufficient_history",
+    }
+    retryable = bool(errors) and all(
+        finding.get("code") in retryable_codes
+        for finding in errors
+    )
     return {
+        "policy_version": HEALTH_POLICY_VERSION,
         "status": status,
-        "usable_for_shadow": not errors,
+        "usable_for_shadow": usable,
+        "eligible_for_weekly_calibration": usable,
+        "retryable": retryable,
         "errors": errors,
         "warnings": warnings,
         "metrics": metrics,
@@ -385,11 +485,91 @@ def render_health_markdown(report: dict) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _write_json(report: dict, path: str | Path) -> None:
+def write_health_report(report: dict, path: str | Path) -> None:
     Path(path).write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def health_report_allows_calibration(report: dict | None) -> bool:
+    if not isinstance(report, dict):
+        return False
+    return bool(
+        report.get(
+            "eligible_for_weekly_calibration",
+            report.get("usable_for_shadow", False),
+        )
+    )
+
+
+def legacy_health_fallback_allowed(snapshot_date: str) -> bool:
+    """Allow missing sidecars only before the health contract became required."""
+    try:
+        observed = date.fromisoformat(str(snapshot_date).strip()[:10])
+        required_from = date.fromisoformat(HEALTH_SIDECAR_REQUIRED_FROM)
+    except ValueError:
+        return False
+    return observed < required_from
+
+
+def read_health_report(path: str | Path) -> dict:
+    try:
+        report = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        return _blocked_report("health_report_invalid", str(exc))
+    if not isinstance(report, dict):
+        return _blocked_report("health_report_invalid", "health report must be an object")
+    return report
+
+
+def archived_snapshot_eligibility(
+    snapshot_path: str | Path,
+    *,
+    health_dir: str | Path | None = None,
+) -> dict:
+    """Resolve a daily archive's sidecar without rewriting legacy history.
+
+    Missing sidecars are accepted only as explicit legacy provenance. All newly
+    archived snapshots receive a sidecar, so a present blocked sidecar always
+    quarantines the raw CSV while leaving that CSV untouched.
+    """
+    snapshot = Path(snapshot_path)
+    directory = (
+        Path(health_dir)
+        if health_dir is not None
+        else snapshot.parent.parent / "daily_health"
+    )
+    sidecar = directory / f"{snapshot.stem}.json"
+    if not sidecar.is_file():
+        legacy = legacy_health_fallback_allowed(snapshot.stem)
+        if not legacy:
+            report = _blocked_report(
+                "health_report_missing",
+                "health sidecar is required from "
+                f"{HEALTH_SIDECAR_REQUIRED_FROM}: {sidecar}",
+            )
+            return {
+                "eligible": False,
+                "legacy_without_health": False,
+                "snapshot": str(snapshot),
+                "health_path": str(sidecar),
+                "health": report,
+            }
+        return {
+            "eligible": True,
+            "legacy_without_health": True,
+            "snapshot": str(snapshot),
+            "health_path": str(sidecar),
+        }
+    report = read_health_report(sidecar)
+    return {
+        "eligible": health_report_allows_calibration(report),
+        "legacy_without_health": False,
+        "snapshot": str(snapshot),
+        "health_path": str(sidecar),
+        "health": report,
+    }
 
 
 def _append_markdown(report: dict, path: str | Path) -> None:
@@ -409,6 +589,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json-output")
     parser.add_argument("--markdown-output")
+    parser.add_argument(
+        "--github-output",
+        default=os.environ.get("GITHUB_OUTPUT", ""),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -421,9 +605,22 @@ def main(argv: list[str] | None = None) -> int:
         report = _blocked_report("snapshot_read_failed", str(exc))
 
     if args.json_output:
-        _write_json(report, args.json_output)
+        write_health_report(report, args.json_output)
     if args.markdown_output:
         _append_markdown(report, args.markdown_output)
+    if args.github_output:
+        with Path(args.github_output).open("a", encoding="utf-8") as handle:
+            handle.write(f"status={report.get('status', 'blocked')}\n")
+            handle.write(
+                "usable="
+                + str(bool(report.get("usable_for_shadow"))).lower()
+                + "\n"
+            )
+            handle.write(
+                "retryable="
+                + str(bool(report.get("retryable"))).lower()
+                + "\n"
+            )
 
     universe = report.get("metrics", {}).get("universe", {})
     print(

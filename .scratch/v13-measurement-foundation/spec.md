@@ -158,6 +158,8 @@ Status: resolved
   - 全體至少 60 筆 completed-R episodes 才允許評估參數，100 筆為目標。
   - 腿別／order type 至少各 20 筆 completed-R，且全體閘門已通過，
     才標記該 segment 為 tuning-ready。
+  - 上述 segment 門檻彼此獨立；三條腿與兩種 order type 不聯合阻擋全體
+    60 筆閘門。未滿 20 的 segment 只禁止該 segment 的個別判讀。
   - 閘門只授權分析，不會自動修改任何權重。
 - Episode 建構前必須同時符合目前 `TradePlanVersion`、
   `PlanMeasurementVersion` 與 `V13MeasurementVersion`；舊世代 R 不得解鎖閘門。

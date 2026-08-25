@@ -28,7 +28,8 @@ baseline，但不得再解鎖正式權重或 `MIN_PRIORITY_FOR_GO` 校準。
 ## Acceptance criteria
 
 1. V1.3 completed-R 未達 60 時，週報明確顯示禁止調參。
-2. 達 60 時只開放全體分析；segment 仍以各 20 completed-R 判定。
+2. 達 60 時只開放全體授權分析審查；segment 仍以各 20 completed-R 獨立判定，
+   五個 segment 不聯合阻擋 global gate。
 3. 達 100 時顯示 target reached，但不自動修改參數。
 4. legacy-v0 不論累積多少樣本都不能解鎖 V1.3。
 5. 缺檔、損壞或任何版本／cohort 不符時，週報顯示 fail-closed 原因。

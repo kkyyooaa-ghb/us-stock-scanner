@@ -1,0 +1,12 @@
+URL: https://chatgpt.com/c/6a8c28ca-4e54-83e9-8dfa-913d406337b7
+Title: 審查美股掃描器進度
+Baseline: origin/main@900fa2640bff4c6f55f2a5c0623b25580c033a0f
+Task: jointly adjudicate segment scope and review the 1-7 integrity-hardening implementation contract.
+No browser/session state or credentials are stored here.
+
+Final decision: B.
+Reason: overall completed-R >= 60 plus cohort/universe/integrity opens global authorized analysis review. Each of the three selected-leg and two order-type scopes independently needs completed-R >= 20 for its own interpretation; the five scopes are not conjunctive global blockers.
+Withdrawn: the prior claim that all five segments must reach 20 before the global gate, and the related P0 implementation-bug finding.
+Retained: 8/18 containment, shared health/usability, pre-publication bounded retry, weekly/shadow quarantine, runtime provenance, zero-arrival ETA denominator, and 60/100/new-cohort wording.
+Joint systemic default: max(2, ceil(expected * 5%)); NDX-99 blocks at 5. One ordinary eligibility exclusion remains a usable warning.
+ChatGPT Pro did not run repository tests and did not produce downloadable artifacts. Codex independently implemented and verified the local worktree.

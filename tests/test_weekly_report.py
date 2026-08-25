@@ -17,11 +17,14 @@ import weekly_report
 from snapshot_schema import SNAPSHOT_COLUMNS, write_failure_snapshot
 from weekly_report import (
     aggregate,
+    archive_daily_health,
+    archive_incident_artifact,
     build_message,
     calibration_engine,
     legacy_v12_sample_complete,
     load_v13_calibration_gate,
     notion_calibration_stats,
+    operational_week_summary,
     refresh_v13_episode_artifacts,
     summarize_calibration_rows,
     select_daily_artifacts,
@@ -167,6 +170,10 @@ def _v13_summary(completed=2, *, tuning_allowed=None, universe=None):
             "remaining_to_target": max(target - completed, 0),
             "stage": stage,
             "parameter_tuning_allowed": tuning_allowed,
+            "global_analysis_allowed": tuning_allowed,
+            "scope_model": "overall_gate_with_independent_segments",
+            "all_segments_required_for_global": False,
+            "segment_min_completed": Config.EPISODE_SEGMENT_MIN_COMPLETED,
         },
         "universe_cohort": universe,
         "by_selected_leg": [],
@@ -184,7 +191,50 @@ def _v13_gate(completed=2):
         return load_v13_calibration_gate(path)
 
 
+def _health(usable=True):
+    return {
+        "status": "ok" if usable else "blocked",
+        "usable_for_shadow": usable,
+        "eligible_for_weekly_calibration": usable,
+        "retryable": not usable,
+        "errors": [] if usable else [{"code": "test_incident", "message": "blocked"}],
+        "warnings": [],
+        "metrics": {},
+    }
+
+
 class SnapshotArchiveTests(unittest.TestCase):
+    def test_daily_archive_is_create_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            first = pd.DataFrame([{"Ticker": "ORIGINAL"}])
+            replacement = pd.DataFrame([{"Ticker": "REPLACEMENT"}])
+            weekly_report.archive_daily_csv(first, "2026-08-18", report_root)
+            weekly_report.archive_daily_csv(
+                replacement,
+                "2026-08-18",
+                report_root,
+            )
+            archived = pd.read_csv(
+                report_root / "daily" / "2026-08-18.csv",
+                encoding="utf-8-sig",
+            )
+
+        self.assertEqual(["ORIGINAL"], archived["Ticker"].tolist())
+
+    def test_health_archive_is_create_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            archive_daily_health(_health(False), "2026-08-18", report_root)
+            archive_daily_health(_health(True), "2026-08-18", report_root)
+            archived = json.loads(
+                (report_root / "daily_health" / "2026-08-18.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual("blocked", archived["status"])
+
     def test_new_snapshots_are_archived_through_canonical_writer(self):
         frame = pd.DataFrame([{
             "Ticker": "TEST",
@@ -306,6 +356,7 @@ class SnapshotArchiveTests(unittest.TestCase):
                     2026, 7, 27, 13, 5, tzinfo=weekly_report.timezone.utc
                 ),
                 "frame": premarket,
+                "health": _health(True),
             },
             {
                 "id": 2,
@@ -314,6 +365,7 @@ class SnapshotArchiveTests(unittest.TestCase):
                     2026, 7, 27, 18, 0, tzinfo=weekly_report.timezone.utc
                 ),
                 "frame": failure,
+                "health": _health(False),
             },
         ]
 
@@ -340,6 +392,7 @@ class SnapshotArchiveTests(unittest.TestCase):
                     2026, 7, 27, 7, 30, tzinfo=weekly_report.timezone.utc
                 ),
                 "frame": preopen,
+                "health": _health(True),
             },
             {
                 "id": 4,
@@ -348,12 +401,211 @@ class SnapshotArchiveTests(unittest.TestCase):
                     2026, 7, 27, 15, 0, tzinfo=weekly_report.timezone.utc
                 ),
                 "frame": after_open,
+                "health": _health(True),
             },
         ]
 
         selected = select_daily_artifacts(candidates)
 
         self.assertEqual([3], [item["id"] for item in selected])
+
+    def test_missing_inline_health_uses_known_sidecar_before_legacy_fallback(self):
+        frame = pd.DataFrame([{
+            "SnapshotRecordType": "data",
+            "Priority": 7,
+            "ScanSession": "premarket",
+        }])
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            archive_daily_health(_health(False), "2026-08-18", report_root)
+            candidates = [{
+                "id": 18,
+                "et_date": "2026-08-18",
+                "created_at": weekly_report.datetime(
+                    2026, 8, 18, 13, 5, tzinfo=weekly_report.timezone.utc
+                ),
+                "frame": frame,
+                "health": None,
+            }]
+
+            selected = select_daily_artifacts(candidates, report_root)
+
+        self.assertFalse(selected[0]["health_usable"])
+        self.assertEqual("blocked", selected[0]["health"]["status"])
+
+    def test_authoritative_sidecar_overrides_old_inline_usable_health(self):
+        frame = pd.DataFrame([{
+            "SnapshotRecordType": "data",
+            "Priority": 7,
+            "ScanSession": "premarket",
+        }])
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            archive_daily_health(_health(False), "2026-08-18", report_root)
+            candidates = [{
+                "id": 1818,
+                "et_date": "2026-08-18",
+                "created_at": weekly_report.datetime(
+                    2026, 8, 18, 13, 5, tzinfo=weekly_report.timezone.utc
+                ),
+                "frame": frame,
+                "health": _health(True),
+            }]
+
+            selected = select_daily_artifacts(candidates, report_root)
+
+        self.assertFalse(selected[0]["health_usable"])
+        self.assertEqual("blocked", selected[0]["health"]["status"])
+
+    def test_post_policy_candidates_use_their_own_inline_run_health(self):
+        frame = pd.DataFrame([{
+            "SnapshotRecordType": "data",
+            "Priority": 7,
+            "ScanSession": "premarket",
+        }])
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            archive_daily_health(_health(True), "2026-08-24", report_root)
+            candidates = [
+                {
+                    "id": 2401,
+                    "et_date": "2026-08-24",
+                    "created_at": weekly_report.datetime(
+                        2026, 8, 24, 13, 0,
+                        tzinfo=weekly_report.timezone.utc,
+                    ),
+                    "frame": frame,
+                    "health": _health(True),
+                },
+                {
+                    "id": 2402,
+                    "et_date": "2026-08-24",
+                    "created_at": weekly_report.datetime(
+                        2026, 8, 24, 13, 10,
+                        tzinfo=weekly_report.timezone.utc,
+                    ),
+                    "frame": frame,
+                    "health": _health(False),
+                },
+            ]
+
+            selected = select_daily_artifacts(candidates, report_root)
+            later_health = weekly_report.resolve_artifact_health(
+                candidates[1], report_root
+            )
+
+        self.assertEqual([2401], [item["id"] for item in selected])
+        self.assertFalse(
+            weekly_report.health_report_allows_calibration(later_health)
+        )
+
+    def test_post_policy_inline_usable_is_not_overridden_by_day_sidecar(self):
+        frame = pd.DataFrame([{
+            "SnapshotRecordType": "data",
+            "Priority": 7,
+            "ScanSession": "premarket",
+        }])
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            archive_daily_health(_health(False), "2026-08-24", report_root)
+            candidates = [{
+                "id": 2410,
+                "et_date": "2026-08-24",
+                "created_at": weekly_report.datetime(
+                    2026, 8, 24, 13, 5,
+                    tzinfo=weekly_report.timezone.utc,
+                ),
+                "frame": frame,
+                "health": _health(True),
+            }]
+
+            selected = select_daily_artifacts(candidates, report_root)
+
+        self.assertTrue(selected[0]["health_usable"])
+        self.assertEqual("ok", selected[0]["health"]["status"])
+
+    def test_post_policy_missing_inline_does_not_borrow_day_sidecar(self):
+        frame = pd.DataFrame([{
+            "SnapshotRecordType": "data",
+            "Priority": 7,
+            "ScanSession": "premarket",
+        }])
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            archive_daily_health(_health(True), "2026-08-24", report_root)
+            candidates = [{
+                "id": 2411,
+                "et_date": "2026-08-24",
+                "created_at": weekly_report.datetime(
+                    2026, 8, 24, 13, 5,
+                    tzinfo=weekly_report.timezone.utc,
+                ),
+                "frame": frame,
+                "health": None,
+            }]
+
+            selected = select_daily_artifacts(candidates, report_root)
+
+        self.assertFalse(selected[0]["health_usable"])
+        self.assertEqual(
+            "health_report_missing",
+            selected[0]["health"]["errors"][0]["code"],
+        )
+
+    def test_missing_health_and_sidecar_is_explicit_legacy_warning(self):
+        frame = pd.DataFrame([{
+            "SnapshotRecordType": "data",
+            "Priority": 7,
+            "ScanSession": "premarket",
+        }])
+        with tempfile.TemporaryDirectory() as tmp:
+            candidates = [{
+                "id": 17,
+                "et_date": "2026-08-17",
+                "created_at": weekly_report.datetime(
+                    2026, 8, 17, 13, 5, tzinfo=weekly_report.timezone.utc
+                ),
+                "frame": frame,
+                "health": None,
+            }]
+
+            selected = select_daily_artifacts(
+                candidates,
+                Path(tmp) / "reports",
+            )
+
+        self.assertTrue(selected[0]["health_usable"])
+        self.assertTrue(selected[0]["health"]["legacy_without_health"])
+        self.assertEqual("warning", selected[0]["health"]["status"])
+
+    def test_post_policy_missing_health_is_incident_not_legacy(self):
+        frame = pd.DataFrame([{
+            "SnapshotRecordType": "data",
+            "Priority": 7,
+            "ScanSession": "premarket",
+        }])
+        with tempfile.TemporaryDirectory() as tmp:
+            candidates = [{
+                "id": 24,
+                "et_date": "2026-08-24",
+                "created_at": weekly_report.datetime(
+                    2026, 8, 24, 13, 5, tzinfo=weekly_report.timezone.utc
+                ),
+                "frame": frame,
+                "health": None,
+            }]
+
+            selected = select_daily_artifacts(
+                candidates,
+                Path(tmp) / "reports",
+            )
+
+        self.assertFalse(selected[0]["health_usable"])
+        self.assertEqual("blocked", selected[0]["health"]["status"])
+        self.assertEqual(
+            "health_report_missing",
+            selected[0]["health"]["errors"][0]["code"],
+        )
 
     def test_control_only_day_is_selected_and_permanently_archived(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -372,6 +624,7 @@ class SnapshotArchiveTests(unittest.TestCase):
                     2026, 7, 27, 13, 5, tzinfo=weekly_report.timezone.utc
                 ),
                 "frame": control,
+                "health": _health(False),
             }]
 
             selected = select_daily_artifacts(candidates)
@@ -388,6 +641,49 @@ class SnapshotArchiveTests(unittest.TestCase):
         self.assertEqual([9], [item["id"] for item in selected])
         self.assertEqual("control", archived.iloc[0]["SnapshotRecordType"])
         self.assertEqual("error", archived.iloc[0]["SnapshotRunStatus"])
+
+    def test_unusable_attempt_is_archived_without_replacing_daily_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            candidate = {
+                "id": 123,
+                "et_date": "2026-08-18",
+                "frame": pd.DataFrame([{"Ticker": "MNST", "Priority": 1}]),
+                "health": _health(False),
+                "runtime_provenance": {"schema_version": 1},
+            }
+
+            paths = archive_incident_artifact(candidate, report_root)
+
+            incident = report_root / "incidents" / "2026-08-18" / "run-123"
+            self.assertTrue((incident / "scan_result.csv").is_file())
+            self.assertTrue((incident / "snapshot_health.json").is_file())
+            self.assertTrue((incident / "runtime_provenance.json").is_file())
+            self.assertFalse((report_root / "daily" / "2026-08-18.csv").exists())
+            self.assertEqual(3, len(paths))
+
+    def test_operational_summary_separates_usable_incident_and_missing_days(self):
+        selected = [
+            {"et_date": "2026-08-17", "health_usable": True, "incident": False},
+            {"et_date": "2026-08-18", "health_usable": False, "incident": True},
+        ]
+        with patch(
+            "weekly_report.is_trading_day",
+            side_effect=lambda date: {
+                "ok": True,
+                "is_session": date in {"2026-08-17", "2026-08-18", "2026-08-19"},
+            },
+        ):
+            summary = operational_week_summary(
+                "2026-08-17",
+                "2026-08-23",
+                selected,
+            )
+
+        self.assertEqual(3, summary["scheduled_days"])
+        self.assertEqual(1, summary["usable_days"])
+        self.assertEqual(2, summary["incident_days"])
+        self.assertEqual(["2026-08-19"], summary["missing_artifact_dates"])
 
 
 class CalibrationEngineTests(unittest.TestCase):
@@ -490,6 +786,8 @@ class V13CalibrationGateTests(unittest.TestCase):
 
         self.assertEqual("minimum_reached", minimum["status"])
         self.assertTrue(minimum["parameter_tuning_allowed"])
+        self.assertTrue(minimum["global_analysis_allowed"])
+        self.assertFalse(minimum["all_segments_required_for_global"])
         self.assertEqual("target_reached", target["status"])
         self.assertTrue(target["parameter_tuning_allowed"])
 
@@ -517,6 +815,27 @@ class V13CalibrationGateTests(unittest.TestCase):
         self.assertFalse(gate["ok"])
         self.assertEqual("invalid_maturity", gate["reason"])
 
+    def test_explicit_contradictory_segment_scope_fails_closed(self):
+        payload = _v13_summary(60)
+        payload["segment_scope"] = {
+            "mode": "all_segments_before_global",
+            "global_gate_requires_all_segments": True,
+            "segment_min_completed": Config.EPISODE_SEGMENT_MIN_COMPLETED,
+            "selected_legs": [
+                "consolidation_dip",
+                "healthy_pullback",
+                "oversold_bounce",
+            ],
+            "order_types": ["buy_limit_zone", "buy_stop_reclaim"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "summary.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            gate = load_v13_calibration_gate(path)
+
+        self.assertFalse(gate["ok"])
+        self.assertEqual("invalid_segment_scope", gate["reason"])
+
     def test_segment_needs_twenty_completed_and_overall_minimum(self):
         payload = _v13_summary(60)
         payload["by_selected_leg"] = [{
@@ -529,6 +848,8 @@ class V13CalibrationGateTests(unittest.TestCase):
         gate = self._load(payload)
 
         self.assertTrue(gate["ok"])
+        self.assertTrue(gate["global_analysis_allowed"])
+        self.assertFalse(gate["all_segments_required_for_global"])
         self.assertFalse(gate["by_selected_leg"][0]["tuning_ready"])
 
     def test_message_shows_fail_closed_reason(self):
@@ -595,8 +916,8 @@ class V13CalibrationGateTests(unittest.TestCase):
                 (report_root / "latest.json").read_text(encoding="utf-8")
             )
 
-        # 4:gate 新增 projection(達標日預估,純資訊)
-        self.assertEqual(4, payload["schema_version"])
+        # 5:新增 operational scheduled/usable/incident day counts。
+        self.assertEqual(5, payload["schema_version"])
         self.assertEqual(2, payload["v13_calibration_gate"]["completed_r"])
         self.assertFalse(
             payload["v13_calibration_gate"]["parameter_tuning_allowed"]
@@ -643,6 +964,41 @@ class V13CalibrationGateTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual("shadow_refresh_failed", result["reason"])
         episodes.assert_not_called()
+
+    def test_refresh_quarantines_blocked_sidecar_and_keeps_usable_scan_dates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_root = Path(tmp) / "reports"
+            daily_dir = report_root / "daily"
+            daily_dir.mkdir(parents=True)
+            usable = daily_dir / "2026-08-17.csv"
+            blocked = daily_dir / "2026-08-18.csv"
+            usable.write_text("Ticker\nAAPL\n", encoding="utf-8")
+            blocked.write_text("Ticker\nMNST\n", encoding="utf-8")
+            archive_daily_health(_health(False), "2026-08-18", report_root)
+            calls = []
+
+            def track(argv):
+                calls.append(("shadow", argv))
+                return 0
+
+            def episodes(argv):
+                calls.append(("episodes", argv))
+                return 0
+
+            with patch("track_shadow_performance.main", side_effect=track), patch(
+                "build_shadow_episodes.main", side_effect=episodes
+            ):
+                result = refresh_v13_episode_artifacts(report_root)
+            scan_dates = json.loads(
+                (report_root / "usable_scan_dates.json").read_text(encoding="utf-8")
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, result["incident_count"])
+        self.assertIn(str(usable), calls[0][1])
+        self.assertNotIn(str(blocked), calls[0][1])
+        self.assertEqual(["2026-08-17"], scan_dates["dates"])
+        self.assertEqual(["2026-08-18"], scan_dates["incident_dates"])
 
 
 class NotionCalibrationTests(unittest.TestCase):

@@ -101,6 +101,28 @@ class BacklogFoldIsExcluded(unittest.TestCase):
         naive_rate = 37 / 4
         self.assertLess(result["basis"]["arrivals_per_scan_day"], naive_rate / 2)
 
+    def test_normal_zero_arrival_scan_day_is_in_denominator(self):
+        frame = _cohort({
+            "2026-07-28": 25,
+            "2026-07-29": 4,
+            "2026-07-31": 4,
+        })
+        result = project_gate_completion(
+            frame,
+            observed_scan_dates=[
+                "2026-07-28",
+                "2026-07-29",
+                "2026-07-30",
+                "2026-07-31",
+            ],
+            session_resolver=_fake_resolver,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(3, result["basis"]["observed_scan_days"])
+        self.assertEqual(1, result["basis"]["zero_arrival_scan_days"])
+        self.assertAlmostEqual(2.667, result["basis"]["arrivals_per_scan_day"])
+
 
 class PipelineIsDeterministic(unittest.TestCase):
     def test_open_episodes_carry_remaining_bars(self):

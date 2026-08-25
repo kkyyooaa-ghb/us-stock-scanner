@@ -256,8 +256,73 @@ class EpisodeKpiTests(unittest.TestCase):
         self.assertTrue(
             analysis.summary["maturity"]["parameter_tuning_allowed"]
         )
+        self.assertTrue(analysis.summary["maturity"]["global_analysis_allowed"])
+        self.assertTrue(analysis.summary["maturity"]["analysis_review_allowed"])
+        self.assertFalse(analysis.summary["maturity"]["power_ci_review_due"])
+        self.assertFalse(
+            analysis.summary["maturity"]["parameter_change_authorized"]
+        )
+        self.assertEqual(
+            "overall_gate_with_independent_segments",
+            analysis.summary["maturity"]["scope_model"],
+        )
+        self.assertFalse(
+            analysis.summary["maturity"]["all_segments_required_for_global"]
+        )
+        self.assertFalse(
+            analysis.summary["segment_scope"][
+                "global_gate_requires_all_segments"
+            ]
+        )
         self.assertEqual("minimum_reached", analysis.summary["maturity"]["stage"])
         self.assertTrue(analysis.summary["by_selected_leg"][0]["tuning_ready"])
+
+    def test_immature_segment_does_not_close_the_global_gate(self):
+        performance = pd.DataFrame([
+            _row(
+                f"2026-01-{(index % 28) + 1:02d}",
+                f"T{index:03d}",
+                "completed",
+                lifecycle_end=f"2026-01-{(index % 28) + 1:02d}",
+                filled=True,
+                r_lower=0.25,
+                r_upper=0.25,
+                leg=("consolidation_dip" if index < 50 else "oversold_bounce"),
+            )
+            for index in range(60)
+        ])
+
+        analysis = build_episode_analysis(performance)
+        readiness = {
+            row["segment"]: row["tuning_ready"]
+            for row in analysis.summary["by_selected_leg"]
+        }
+
+        self.assertTrue(analysis.summary["maturity"]["global_analysis_allowed"])
+        self.assertTrue(readiness["consolidation_dip"])
+        self.assertFalse(readiness["oversold_bounce"])
+
+    def test_unknown_segment_never_enters_tuning_scope(self):
+        performance = pd.DataFrame([
+            _row(
+                f"2026-01-{(index % 28) + 1:02d}",
+                f"T{index:03d}",
+                "completed",
+                lifecycle_end=f"2026-01-{(index % 28) + 1:02d}",
+                filled=True,
+                r_lower=0.25,
+                r_upper=0.25,
+                leg="future_unreviewed_leg",
+            )
+            for index in range(60)
+        ])
+
+        analysis = build_episode_analysis(performance)
+        segment = analysis.summary["by_selected_leg"][0]
+
+        self.assertTrue(analysis.summary["maturity"]["analysis_review_allowed"])
+        self.assertFalse(segment["in_tuning_scope"])
+        self.assertFalse(segment["tuning_ready"])
 
     def test_old_measurement_versions_cannot_unlock_tuning_gate(self):
         current = _row(

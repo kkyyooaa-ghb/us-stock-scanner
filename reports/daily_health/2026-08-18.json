@@ -1,0 +1,78 @@
+{
+  "policy_version": "snapshot-usability-v1",
+  "status": "blocked",
+  "usable_for_shadow": false,
+  "eligible_for_weekly_calibration": false,
+  "retryable": true,
+  "errors": [
+    {
+      "code": "systemic_data_quality_failure",
+      "message": "data-quality exclusions reached the systemic threshold: 97/99 >= 5",
+      "count": 97
+    }
+  ],
+  "warnings": [
+    {
+      "code": "universe_not_processed",
+      "message": "some universe tickers were excluded or missing: stale_bar=97, insufficient_history=1",
+      "count": 98
+    }
+  ],
+  "metrics": {
+    "identity": {
+      "snapshot_schema_versions": ["v1.3.3"],
+      "signal_engine_versions": ["v1.2.1"],
+      "trade_plan_versions": ["v1.3.1-shadow"],
+      "plan_measurement_versions": ["v1.3.1-shadow"],
+      "config_hashes": ["8142e595d788ac06"],
+      "git_commit_shas": ["2a48f1e912787541da6c024d06eca24539cb3c7f"],
+      "snapshot_as_of_et": ["2026-08-18T09:00:53.511457-04:00"]
+    },
+    "universe": {
+      "expected": 99,
+      "processed": 1,
+      "excluded": 98,
+      "missing": 0,
+      "reasons": {
+        "stale_bar": 97,
+        "insufficient_history": 1
+      }
+    },
+    "usability_policy": {
+      "version": "snapshot-usability-v1",
+      "eligibility_reasons": [
+        "insufficient_history",
+        "liquidity_below_min",
+        "price_below_min"
+      ],
+      "data_quality_reasons": [
+        "download_missing",
+        "processing_error",
+        "stale_bar"
+      ],
+      "eligibility_exclusions": 1,
+      "data_quality_exclusions": 97,
+      "systemic_threshold": 5,
+      "systemic_ratio": 0.05,
+      "systemic_data_quality": true,
+      "systemic_insufficient_history": false
+    },
+    "data_bar_dates": {"2026-08-17": 1},
+    "pregap": {
+      "statuses": {"available": 1},
+      "available": 1,
+      "coverage_rate": 1.0
+    },
+    "trade_plans": {
+      "statuses": {"not_applicable": 1},
+      "shadow_ready": 0,
+      "selected_legs": {"none": 1},
+      "ready_order_types": {}
+    },
+    "selection": {
+      "eligible": 0,
+      "top10": [],
+      "top10_pregap_unavailable": []
+    }
+  }
+}
