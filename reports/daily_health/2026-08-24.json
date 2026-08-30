@@ -1,0 +1,108 @@
+{
+  "status": "warning",
+  "usable_for_shadow": true,
+  "errors": [],
+  "warnings": [
+    {
+      "code": "universe_not_processed",
+      "message": "some universe tickers were excluded or missing: insufficient_history=1",
+      "tickers": [
+        "EA"
+      ],
+      "count": 1
+    },
+    {
+      "code": "pregap_unavailable",
+      "message": "some processed tickers do not have a trusted premarket gap",
+      "tickers": [
+        "ADP",
+        "FAST",
+        "IDXX",
+        "ODFL",
+        "PCAR",
+        "TRI",
+        "VRSK"
+      ],
+      "count": 7
+    }
+  ],
+  "metrics": {
+    "identity": {
+      "snapshot_schema_versions": [
+        "v1.3.3"
+      ],
+      "signal_engine_versions": [
+        "v1.2.1"
+      ],
+      "trade_plan_versions": [
+        "v1.3.1-shadow"
+      ],
+      "plan_measurement_versions": [
+        "v1.3.1-shadow"
+      ],
+      "config_hashes": [
+        "8142e595d788ac06"
+      ],
+      "git_commit_shas": [
+        "900fa2640bff4c6f55f2a5c0623b25580c033a0f"
+      ],
+      "snapshot_as_of_et": [
+        "2026-08-24T09:01:34.900248-04:00"
+      ]
+    },
+    "universe": {
+      "expected": 99,
+      "processed": 98,
+      "excluded": 1,
+      "missing": 0,
+      "reasons": {
+        "insufficient_history": 1
+      }
+    },
+    "data_bar_dates": {
+      "2026-08-21": 98
+    },
+    "pregap": {
+      "statuses": {
+        "available": 91,
+        "stale_quote": 7
+      },
+      "available": 91,
+      "coverage_rate": 0.928571
+    },
+    "trade_plans": {
+      "statuses": {
+        "not_applicable": 80,
+        "shadow_ready": 16,
+        "vetoed": 2
+      },
+      "shadow_ready": 16,
+      "selected_legs": {
+        "none": 82,
+        "consolidation_dip": 10,
+        "healthy_pullback": 5,
+        "oversold_bounce": 1
+      },
+      "ready_order_types": {
+        "buy_limit_zone": 10,
+        "buy_stop_reclaim": 6
+      }
+    },
+    "selection": {
+      "eligible": 14,
+      "top10": [
+        "LITE",
+        "SNDK",
+        "MU",
+        "STX",
+        "FTNT",
+        "CRWD",
+        "ASML",
+        "DDOG",
+        "WMT",
+        "CEG"
+      ],
+      "top10_pregap_unavailable": []
+    }
+  }
+}
