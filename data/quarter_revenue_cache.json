@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-08-29 16:55:46",
+ "generated_at": "2026-09-05 15:42:58",
  "source": "yfinance quarterly_income_stmt",
  "stocks": {
   "AAPL": {
@@ -201,9 +201,9 @@
    "quarters": 5
   },
   "EA": {
-   "yoy": 0.1885,
-   "latest_revenue": 1986000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.1187,
+   "latest_revenue": 2120000000.0,
+   "quarter_label": "2026Q1",
    "quarters": 5
   },
   "EXC": {
@@ -291,9 +291,9 @@
    "quarters": 5
   },
   "KDP": {
-   "yoy": 0.0938,
-   "latest_revenue": 3976000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.7557,
+   "latest_revenue": 7309000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "KHC": {
