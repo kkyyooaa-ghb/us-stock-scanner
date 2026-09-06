@@ -1,0 +1,115 @@
+{
+  "policy_version": "snapshot-usability-v1",
+  "status": "warning",
+  "usable_for_shadow": true,
+  "eligible_for_weekly_calibration": true,
+  "retryable": false,
+  "errors": [],
+  "warnings": [
+    {
+      "code": "universe_not_processed",
+      "message": "some universe tickers were excluded or missing: insufficient_history=1",
+      "tickers": [
+        "EA"
+      ],
+      "count": 1
+    }
+  ],
+  "metrics": {
+    "identity": {
+      "snapshot_schema_versions": [
+        "v1.3.3"
+      ],
+      "signal_engine_versions": [
+        "v1.2.1"
+      ],
+      "trade_plan_versions": [
+        "v1.3.1-shadow"
+      ],
+      "plan_measurement_versions": [
+        "v1.3.1-shadow"
+      ],
+      "config_hashes": [
+        "8142e595d788ac06"
+      ],
+      "git_commit_shas": [
+        "ffe30a79f8c95cd136cea712d4da69bd1fd47270"
+      ],
+      "snapshot_as_of_et": [
+        "2026-09-04T09:01:30.318973-04:00"
+      ]
+    },
+    "universe": {
+      "expected": 99,
+      "processed": 98,
+      "excluded": 1,
+      "missing": 0,
+      "reasons": {
+        "insufficient_history": 1
+      }
+    },
+    "usability_policy": {
+      "version": "snapshot-usability-v1",
+      "eligibility_reasons": [
+        "insufficient_history",
+        "liquidity_below_min",
+        "price_below_min"
+      ],
+      "data_quality_reasons": [
+        "download_missing",
+        "processing_error",
+        "stale_bar"
+      ],
+      "eligibility_exclusions": 1,
+      "data_quality_exclusions": 0,
+      "systemic_threshold": 5,
+      "systemic_ratio": 0.05,
+      "systemic_data_quality": false,
+      "systemic_insufficient_history": false
+    },
+    "data_bar_dates": {
+      "2026-09-03": 98
+    },
+    "pregap": {
+      "statuses": {
+        "available": 98
+      },
+      "available": 98,
+      "coverage_rate": 1.0
+    },
+    "trade_plans": {
+      "statuses": {
+        "not_applicable": 81,
+        "shadow_ready": 16,
+        "vetoed": 1
+      },
+      "shadow_ready": 16,
+      "selected_legs": {
+        "none": 82,
+        "consolidation_dip": 8,
+        "healthy_pullback": 5,
+        "oversold_bounce": 3
+      },
+      "ready_order_types": {
+        "buy_stop_reclaim": 9,
+        "buy_limit_zone": 7
+      }
+    },
+    "selection": {
+      "eligible": 13,
+      "top10": [
+        "SNDK",
+        "LITE",
+        "MU",
+        "ROST",
+        "FTNT",
+        "ORLY",
+        "GOOGL",
+        "VRSK",
+        "CRWD",
+        "FER"
+      ],
+      "top10_pregap_unavailable": []
+    }
+  }
+}
