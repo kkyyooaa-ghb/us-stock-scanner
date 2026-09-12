@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-09-05 15:42:58",
+ "generated_at": "2026-09-12 15:56:18",
  "source": "yfinance quarterly_income_stmt",
  "stocks": {
   "AAPL": {
@@ -21,9 +21,9 @@
    "quarters": 5
   },
   "ADI": {
-   "yoy": 0.3725,
-   "latest_revenue": 3623465000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.3963,
+   "latest_revenue": 4021899000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "ADP": {
@@ -33,9 +33,9 @@
    "quarters": 5
   },
   "ADSK": {
-   "yoy": 0.1843,
-   "latest_revenue": 1934000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.1605,
+   "latest_revenue": 2046000000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "AEP": {
@@ -51,9 +51,9 @@
    "quarters": 5
   },
   "AMAT": {
-   "yoy": 0.1141,
-   "latest_revenue": 7910000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.2483,
+   "latest_revenue": 9115000000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "AMD": {
@@ -93,9 +93,9 @@
    "quarters": 5
   },
   "AVGO": {
-   "yoy": 0.4787,
-   "latest_revenue": 22187000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.855,
+   "latest_revenue": 29591000000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "AXON": {
@@ -153,15 +153,15 @@
    "quarters": 5
   },
   "CRWD": {
-   "yoy": 0.2557,
-   "latest_revenue": 1385629000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.2583,
+   "latest_revenue": 1470897000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "CSCO": {
-   "yoy": 0.1196,
-   "latest_revenue": 15841000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.1758,
+   "latest_revenue": 17252000000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "CSX": {
@@ -201,9 +201,9 @@
    "quarters": 5
   },
   "EA": {
-   "yoy": 0.1187,
-   "latest_revenue": 2120000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.1885,
+   "latest_revenue": 1986000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "EXC": {
@@ -279,9 +279,9 @@
    "quarters": 5
   },
   "INTU": {
-   "yoy": 0.1037,
-   "latest_revenue": 8558000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.1365,
+   "latest_revenue": 4354000000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "ISRG": {
@@ -315,9 +315,9 @@
    "quarters": 5
   },
   "LITE": {
-   "yoy": 0.9012,
-   "latest_revenue": 808400000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 1.0934,
+   "latest_revenue": 1006300000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "LRCX": {
@@ -369,9 +369,9 @@
    "quarters": 5
   },
   "MRVL": {
-   "yoy": 0.2757,
-   "latest_revenue": 2417800000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.3655,
+   "latest_revenue": 2739300000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "MSFT": {
@@ -399,9 +399,9 @@
    "quarters": 5
   },
   "NVDA": {
-   "yoy": 0.8523,
-   "latest_revenue": 81615000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 1.0585,
+   "latest_revenue": 96221000000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "NXPI": {
@@ -423,9 +423,9 @@
    "quarters": 5
   },
   "PANW": {
-   "yoy": 0.3115,
-   "latest_revenue": 3002000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.3445,
+   "latest_revenue": 3410000000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "PAYX": {
@@ -441,9 +441,9 @@
    "quarters": 5
   },
   "PDD": {
-   "yoy": 0.1103,
-   "latest_revenue": 106229000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.0805,
+   "latest_revenue": 112358000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "PEP": {
@@ -483,9 +483,9 @@
    "quarters": 5
   },
   "ROST": {
-   "yoy": 0.2057,
-   "latest_revenue": 6010476000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.1331,
+   "latest_revenue": 6264886000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "SBUX": {
@@ -501,15 +501,15 @@
    "quarters": 5
   },
   "SNDK": {
-   "yoy": 2.5103,
-   "latest_revenue": 5950000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 3.7159,
+   "latest_revenue": 8965000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "SNPS": {
-   "yoy": 0.4187,
-   "latest_revenue": 2275985000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.4237,
+   "latest_revenue": 2476822000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "STX": {
@@ -567,21 +567,21 @@
    "quarters": 5
   },
   "WDAY": {
-   "yoy": 0.1348,
-   "latest_revenue": 2542000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.1282,
+   "latest_revenue": 2649000000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "WDC": {
-   "yoy": 0.4547,
-   "latest_revenue": 3337000000.0,
-   "quarter_label": "2026Q1",
+   "yoy": 0.4384,
+   "latest_revenue": 3747000000.0,
+   "quarter_label": "2026Q2",
    "quarters": 5
   },
   "WMT": {
-   "yoy": 0.0733,
-   "latest_revenue": 177751000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.0594,
+   "latest_revenue": 187937000000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   },
   "XEL": {
@@ -591,9 +591,9 @@
    "quarters": 5
   },
   "ZS": {
-   "yoy": 0.2543,
-   "latest_revenue": 850475000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.2488,
+   "latest_revenue": 898185000.0,
+   "quarter_label": "2026Q3",
    "quarters": 5
   }
  }
