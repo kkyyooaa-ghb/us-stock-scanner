@@ -1,0 +1,20 @@
+{
+  "policy_version": "snapshot-usability-v1",
+  "status": "skipped",
+  "usable_for_shadow": false,
+  "eligible_for_weekly_calibration": false,
+  "retryable": false,
+  "errors": [],
+  "warnings": [],
+  "metrics": {
+    "record_types": {
+      "control": 1
+    },
+    "run_status": {
+      "skipped": 1
+    },
+    "control_types": {
+      "NonTradingSession": 1
+    }
+  }
+}
