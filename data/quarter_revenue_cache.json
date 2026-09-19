@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-09-12 15:56:18",
+ "generated_at": "2026-09-19 16:10:07",
  "source": "yfinance quarterly_income_stmt",
  "stocks": {
   "AAPL": {
@@ -201,9 +201,9 @@
    "quarters": 5
   },
   "EA": {
-   "yoy": 0.1885,
-   "latest_revenue": 1986000000.0,
-   "quarter_label": "2026Q2",
+   "yoy": 0.1187,
+   "latest_revenue": 2120000000.0,
+   "quarter_label": "2026Q1",
    "quarters": 5
   },
   "EXC": {
